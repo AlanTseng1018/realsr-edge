@@ -1,0 +1,28 @@
+# venv
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data & artifacts
+data/
+experiments/
+checkpoints/
+logs/
+runs/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
