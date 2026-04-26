@@ -10,12 +10,12 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Data & artifacts
-data/
-experiments/
-checkpoints/
-logs/
-runs/
+# Data & artifacts (anchored to repo root so they don't match src/data/, src/experiments/, etc.)
+/data/
+/experiments/
+/checkpoints/
+/logs/
+/runs/
 *.pth
 *.pt
 *.ckpt
@@ -24,5 +24,6 @@ runs/
 # IDE / OS
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
