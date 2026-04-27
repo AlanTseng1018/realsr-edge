@@ -17,9 +17,16 @@ __pycache__/
 /logs/
 /runs/
 *.pth
-*.pt
 *.ckpt
 *.onnx
+
+# Results: exclude all runs by default; selectively force-add with git add -f
+results/runs/
+results/checkpoints/
+
+# Exclude intermediate epoch checkpoints; keep best.pt via force-add
+epoch_*.pt
+final.pt
 
 # IDE / OS
 .vscode/
