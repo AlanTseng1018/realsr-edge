@@ -27,3 +27,7 @@ __pycache__/
 .claude/
 .DS_Store
 Thumbs.db
+
+# C++ build / vendored single-header libs
+cpp_inference/build/
+cpp_inference/third_party/stb/*.h

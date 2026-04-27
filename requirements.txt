@@ -6,3 +6,11 @@ opencv-python
 matplotlib
 scikit-image
 ipykernel
+
+# Deployment / quantization runtime
+onnx
+onnxruntime-gpu
+
+# torch.compile on Windows needs Triton, which has no official Windows wheels.
+# triton-windows is a community-maintained build pinned for compat with PyTorch 2.6.
+triton-windows<3.3 ; sys_platform == "win32"
