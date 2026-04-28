@@ -1,0 +1,137 @@
+{
+  "datetime": "2026-04-28T17:29:23",
+  "onnx_dir": "results\\onnx_exports\\edsr_200ep",
+  "val_set_dir": "data\\DIV2K\\DIV2K_valid_HR",
+  "val_set_size": 100,
+  "val_lr_patch": 96,
+  "bench_shape": [
+    1,
+    3,
+    96,
+    96
+  ],
+  "n_warmup": 10,
+  "n_iter": 50,
+  "providers": [
+    "tensorrt",
+    "cuda",
+    "cpu"
+  ],
+  "ort_version": "1.25.0",
+  "ort_available_providers": [
+    "TensorrtExecutionProvider",
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "device_name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "rows": [
+    {
+      "onnx": "edsr_fp16.onnx",
+      "precision": "FP16",
+      "provider": "tensorrt",
+      "size_mb": 2.631715774536133,
+      "psnr_db": 27.437976303100587,
+      "latency_ms_mean": 3.3052940014749765,
+      "latency_ms_std": 0.09237042079758595,
+      "session_build_ms": 207.13140000589192,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_fp16.onnx",
+      "precision": "FP16",
+      "provider": "cuda",
+      "size_mb": 2.631715774536133,
+      "psnr_db": 27.437976303100587,
+      "latency_ms_mean": 3.9388960017822683,
+      "latency_ms_std": 2.089240201250606,
+      "session_build_ms": 30.203200061805546,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_fp16.onnx",
+      "precision": "FP16",
+      "provider": "cpu",
+      "size_mb": 2.631715774536133,
+      "psnr_db": 27.438690490722657,
+      "latency_ms_mean": 45.83296199562028,
+      "latency_ms_std": 2.531264781775986,
+      "session_build_ms": 33.612700062803924,
+      "active_provider": "CPUExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_fp32.onnx",
+      "precision": "FP32",
+      "provider": "tensorrt",
+      "size_mb": 5.239441871643066,
+      "psnr_db": 27.438591766357423,
+      "latency_ms_mean": 5.270196001511067,
+      "latency_ms_std": 2.162474919593548,
+      "session_build_ms": 59.48629998601973,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_fp32.onnx",
+      "precision": "FP32",
+      "provider": "cuda",
+      "size_mb": 5.239441871643066,
+      "psnr_db": 27.438591766357423,
+      "latency_ms_mean": 4.649799999315292,
+      "latency_ms_std": 1.4004775326796999,
+      "session_build_ms": 27.820600080303848,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_fp32.onnx",
+      "precision": "FP32",
+      "provider": "cpu",
+      "size_mb": 5.239441871643066,
+      "psnr_db": 27.438550567626955,
+      "latency_ms_mean": 47.636356002185494,
+      "latency_ms_std": 2.664937212221896,
+      "session_build_ms": 30.28539998922497,
+      "active_provider": "CPUExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_int8_static.onnx",
+      "precision": "INT8",
+      "provider": "tensorrt",
+      "size_mb": 1.4141578674316406,
+      "psnr_db": 27.32175521850586,
+      "latency_ms_mean": 6.166135999374092,
+      "latency_ms_std": 1.5437711936549208,
+      "session_build_ms": 89.02950002811849,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_int8_static.onnx",
+      "precision": "INT8",
+      "provider": "cuda",
+      "size_mb": 1.4141578674316406,
+      "psnr_db": 27.32175521850586,
+      "latency_ms_mean": 6.405734000727534,
+      "latency_ms_std": 1.7835275242520705,
+      "session_build_ms": 59.94730000384152,
+      "active_provider": "CUDAExecutionProvider",
+      "error": null
+    },
+    {
+      "onnx": "edsr_int8_static.onnx",
+      "precision": "INT8",
+      "provider": "cpu",
+      "size_mb": 1.4141578674316406,
+      "psnr_db": 27.32080467224121,
+      "latency_ms_mean": 52.31592200230807,
+      "latency_ms_std": 3.318591569038185,
+      "session_build_ms": 60.92800002079457,
+      "active_provider": "CPUExecutionProvider",
+      "error": null
+    }
+  ]
+}

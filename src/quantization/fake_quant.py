@@ -89,26 +89,56 @@ class CalibratingConv2d(nn.Module):
 
     * ``mode='fp32'``: pass-through, identical to the original conv. Default.
     * ``mode='calibrate'``: forward through the original conv, but observe
-      the input tensor's max-abs so we can pick an INT8 scale later.
+      input statistics. We track BOTH the running max-abs (cheap, online)
+      AND an online histogram with dynamic-range rescaling (TensorRT-style).
+      Either statistic can drive the final ``input_amax`` later via
+      :meth:`apply_calibration_method`.
     * ``mode='quantize'``: fake-quantize input (per-tensor) and weight
       (per-output-channel), then run the conv. The activation scale comes
-      from whatever was observed during ``'calibrate'`` mode -- if the
-      module never saw calibration data, ``set_mode('quantize')`` will
-      raise.
+      from ``self.input_amax``, which is set during calibration (default to
+      max-abs running) or overridden via :meth:`apply_calibration_method`.
 
     The wrapper holds a reference to the original ``nn.Conv2d`` -- weights
     are not copied, so checkpoints don't drift between the FP32 and the
     wrapped versions.
+
+    Calibration buffers
+    -------------------
+    * ``_running_max_abs``: online max of ``|x|`` seen during calibration.
+    * ``hist`` + ``hist_max``: online histogram of ``|x|`` with bins covering
+      ``[0, hist_max]``. When a new batch's max exceeds the current
+      ``hist_max``, the existing bins are rescaled into a wider range; the
+      total mass is preserved.
+    * ``input_amax``: the FINAL scale source consumed by the quantize path.
+      During calibration it tracks max-abs running; after calibration the
+      caller can switch it to a percentile-based value via
+      :meth:`apply_calibration_method`.
     """
 
     _VALID_MODES = ("fp32", "calibrate", "quantize")
 
-    def __init__(self, conv: nn.Conv2d) -> None:
+    def __init__(self, conv: nn.Conv2d, n_bins: int = 2048) -> None:
         super().__init__()
         self.conv = conv
-        # Buffers so they move with .to(device) and survive state_dict round-trips
-        self.register_buffer("input_amax", torch.tensor(0.0))
-        self.register_buffer("calibrated", torch.tensor(False))
+        self.n_bins = n_bins
+
+        # Match the wrapped conv's device so buffers don't end up on CPU
+        # when wrap_convs is called after model.to(device). 0-d scalar
+        # buffers happen to tolerate device mismatches via PyTorch's
+        # scalar-broadcast leniency, but the histogram (1-d, 2048 elems)
+        # does not -- ``scatter_add_`` strictly checks device.
+        device = next(conv.parameters()).device
+
+        # Final scale used in quantize mode (set during calibrate; can be
+        # overridden later via apply_calibration_method).
+        self.register_buffer("input_amax", torch.tensor(0.0, device=device))
+
+        # Raw stats accumulated during calibrate mode.
+        self.register_buffer("_running_max_abs", torch.tensor(0.0, device=device))
+        self.register_buffer("hist", torch.zeros(n_bins, device=device))
+        self.register_buffer("hist_max", torch.tensor(0.0, device=device))
+
+        self.register_buffer("calibrated", torch.tensor(False, device=device))
         self.mode: str = "fp32"
 
     def set_mode(self, mode: str) -> None:
@@ -123,6 +153,9 @@ class CalibratingConv2d(nn.Module):
 
     def reset_calibration(self) -> None:
         self.input_amax.zero_()
+        self._running_max_abs.zero_()
+        self.hist.zero_()
+        self.hist_max.zero_()
         self.calibrated.fill_(False)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -131,8 +164,13 @@ class CalibratingConv2d(nn.Module):
 
         if self.mode == "calibrate":
             with torch.no_grad():
-                cur = x.detach().abs().amax()
-                self.input_amax.copy_(torch.maximum(self.input_amax, cur))
+                abs_x = x.detach().abs()
+                cur_max = abs_x.amax()
+                self._running_max_abs.copy_(torch.maximum(self._running_max_abs, cur_max))
+                self._update_histogram(abs_x)
+                # Default scale = running max-abs; apply_calibration_method
+                # can swap this to percentile-based later.
+                self.input_amax.copy_(self._running_max_abs)
                 self.calibrated.fill_(True)
             return self.conv(x)
 
@@ -148,6 +186,109 @@ class CalibratingConv2d(nn.Module):
             dilation=self.conv.dilation,
             groups=self.conv.groups,
         )
+
+    # ------------------------------------------------------------------
+    # Histogram bookkeeping (TensorRT-style with rescaling)
+    # ------------------------------------------------------------------
+
+    def _update_histogram(self, abs_x: Tensor) -> None:
+        """Add ``abs_x`` into the running histogram, expanding range if needed.
+
+        Strategy: when the incoming batch's max exceeds the histogram's
+        current upper bound, re-bin the existing counts into a wider range
+        before adding the new contribution. Adds 10% headroom on rescale
+        to amortize away frequent re-binning across many small jumps.
+        """
+        cur_max = abs_x.amax().item()
+        cur_hist_max = self.hist_max.item()
+
+        if cur_hist_max == 0.0:
+            self._rescale_histogram(max(cur_max, 1e-8))
+        elif cur_max > cur_hist_max:
+            self._rescale_histogram(max(cur_max * 1.1, cur_hist_max * 1.5))
+
+        # Add new batch contribution. We avoid ``torch.histc`` because on
+        # some CUDA configurations it returns a CPU tensor and then fails
+        # the device-mismatched ``add_``. ``scatter_add_`` is guaranteed
+        # device-preserving.
+        flat = abs_x.flatten().float()
+        hmax = self.hist_max.item()
+        if hmax > 0.0:
+            indices = (flat / hmax * self.n_bins).long().clamp_(0, self.n_bins - 1)
+            ones = torch.ones_like(flat)
+            self.hist.scatter_add_(0, indices, ones)
+
+    def _rescale_histogram(self, new_max: float) -> None:
+        """Re-bin the existing histogram from [0, hist_max] into [0, new_max]."""
+        old_max = self.hist_max.item()
+        if old_max == 0.0:
+            self.hist_max.fill_(new_max)
+            self.hist.zero_()
+            return
+
+        # Map each old bin's center to a new bin index, then sum-reduce.
+        n = self.n_bins
+        device = self.hist.device
+        old_centers = (
+            torch.arange(n, dtype=torch.float32, device=device) + 0.5
+        ) * (old_max / n)
+        new_indices = (old_centers / (new_max / n)).long().clamp(0, n - 1)
+        rescaled = torch.zeros_like(self.hist)
+        rescaled.index_add_(0, new_indices, self.hist)
+        self.hist.copy_(rescaled)
+        self.hist_max.fill_(new_max)
+
+    def percentile_from_hist(self, percentile: float) -> float:
+        """Return the activation magnitude at ``percentile`` of the cumulative
+        histogram. ``percentile`` is a fraction in (0, 1], e.g. 0.999."""
+        if not 0.0 < percentile <= 1.0:
+            raise ValueError(f"percentile must be in (0, 1], got {percentile}")
+        total = self.hist.sum().item()
+        if total <= 0.0:
+            return 0.0
+
+        cdf = self.hist.cumsum(0) / total
+        target = (cdf >= percentile).nonzero()
+        bin_width = self.hist_max.item() / self.n_bins
+        if len(target) == 0:
+            return self.hist_max.item()
+        idx = int(target[0].item())
+
+        # Linear interpolation within the bin for sub-bin precision.
+        prev_cdf = cdf[idx - 1].item() if idx > 0 else 0.0
+        cur_cdf = cdf[idx].item()
+        if cur_cdf <= prev_cdf:
+            return (idx + 0.5) * bin_width
+        bin_start = idx * bin_width
+        frac = (percentile - prev_cdf) / (cur_cdf - prev_cdf)
+        return bin_start + frac * bin_width
+
+    def apply_calibration_method(
+        self,
+        method: str = "max-abs",
+        percentile: float = 0.999,
+    ) -> None:
+        """Set ``self.input_amax`` based on choice of calibration method.
+
+        ``method='max-abs'``  -> use the running max-abs from calibrate
+        ``method='percentile'`` -> use ``self.percentile_from_hist(percentile)``
+
+        Must be called after at least one calibration pass.
+        """
+        if not bool(self.calibrated):
+            raise RuntimeError(
+                "apply_calibration_method called before any calibration pass."
+            )
+        if method == "max-abs":
+            self.input_amax.copy_(self._running_max_abs)
+        elif method == "percentile":
+            v = self.percentile_from_hist(percentile)
+            self.input_amax.fill_(v)
+        else:
+            raise ValueError(
+                f"Unknown calibration method: {method!r}. "
+                f"Expected 'max-abs' or 'percentile'."
+            )
 
     def extra_repr(self) -> str:
         return f"mode={self.mode}, calibrated={bool(self.calibrated)}"
@@ -192,3 +333,19 @@ def set_all_modes(wrappers: dict[str, CalibratingConv2d], mode: str) -> None:
 def reset_all_calibration(wrappers: dict[str, CalibratingConv2d]) -> None:
     for w in wrappers.values():
         w.reset_calibration()
+
+
+def apply_calibration_to_all(
+    wrappers: dict[str, CalibratingConv2d],
+    method: str = "max-abs",
+    percentile: float = 0.999,
+) -> None:
+    """Update ``input_amax`` on every wrapper using the chosen calibration method.
+
+    See :meth:`CalibratingConv2d.apply_calibration_method`. Common usage:
+    after a single calibration pass that collected both max-abs and
+    histogram statistics, call this once per scheme to flip the entire
+    model between calibration variants for ablation.
+    """
+    for w in wrappers.values():
+        w.apply_calibration_method(method=method, percentile=percentile)

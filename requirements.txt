@@ -1,4 +1,4 @@
---index-url https://download.pytorch.org/whl/cu124
+--extra-index-url https://download.pytorch.org/whl/cu124
 torch
 torchvision
 numpy
@@ -6,6 +6,14 @@ opencv-python
 matplotlib
 scikit-image
 ipykernel
+
+# ONNX export + runtime + tooling (Stage 4 of the deploy pipeline)
+onnx
+onnxruntime-gpu
+onnxconverter-common
+
+# torch.compile on Windows needs Triton, which has no official Windows wheels.
+triton-windows<3.3 ; sys_platform == "win32"
 
 # Deployment / quantization runtime
 onnx

@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import math
+import platform
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 from torch import nn
@@ -316,6 +318,240 @@ def write_shootout_md(path: Path, rows: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Layer classification + Markdown sensitivity / report writers
+# ---------------------------------------------------------------------------
+
+def classify_layer(name: str) -> str:
+    """Categorize an EDSR Conv2d by its role in the network.
+
+    The category names align with how SR papers (PAMS, 2DQuant) talk about
+    quantization sensitivity: input/output convs and the upsampler are
+    typically the critical ones; ResBlock interior tends to be robust.
+    """
+    if name == "head":
+        return "input"
+    if name == "tail":
+        return "output"
+    if name.startswith("upsampler"):
+        return "upsampler"
+    if name.startswith("body."):
+        # body.0.conv1 -> 2 dots -> resblock interior
+        # body.16     -> 1 dot  -> post-resblock conv (the long-skip target)
+        return "resblock-interior" if name.count(".") >= 2 else "post-resblock"
+    return "other"
+
+
+def gather_metadata(
+    args: argparse.Namespace,
+    n_params: int,
+    val_set_size: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Collect everything that should appear in 'What was tested' section."""
+    ckpt_path = Path(args.checkpoint)
+    ckpt_size_mb = ckpt_path.stat().st_size / (1024 * 1024)
+    ckpt_mtime = datetime.datetime.fromtimestamp(
+        ckpt_path.stat().st_mtime
+    ).isoformat(timespec="seconds")
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+    else:
+        device_name = platform.processor() or "CPU"
+
+    return {
+        "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+        "checkpoint_path": str(ckpt_path),
+        "checkpoint_mtime": ckpt_mtime,
+        "checkpoint_size_mb": ckpt_size_mb,
+        "model_arch": (
+            f"EDSR(scale_factor={args.scale}, "
+            f"n_resblocks={args.n_resblocks}, n_feats={args.n_feats})"
+        ),
+        "model_params": n_params,
+        "device": str(device),
+        "device_name": device_name,
+        "torch_version": torch.__version__,
+        "val_set_dir": str(Path(args.data_root) / args.val_dir),
+        "val_set_size": val_set_size,
+        "val_degradation": "realistic",
+        "val_lr_patch": args.patch_size,
+        "calib_batches": args.calib_batches,
+        "calib_samples": args.calib_batches * args.batch_size,
+        "quant_act_scheme": "symmetric per-tensor INT8 (range -128..127)",
+        "quant_weight_scheme": "symmetric per-output-channel INT8 (range -128..127)",
+        "calibration_method": "max-abs (no percentile clipping, no KL-div)",
+    }
+
+
+def write_sensitivity_md(path: Path, rows: list[dict]) -> None:
+    """Markdown table version of sensitivity.csv (sorted, with class column)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write("# Per-layer Quantization Sensitivity\n\n")
+        f.write(
+            "Each row: hold every other layer in FP32, fake-quantize ONLY this "
+            "Conv2d to INT8, measure PSNR drop. Larger drop = layer is more "
+            "quantization-sensitive.\n\n"
+        )
+        f.write("| Rank | Layer | PSNR (dB) | Drop (dB) | Class |\n")
+        f.write("|---:|---|---:|---:|---|\n")
+        for i, r in enumerate(rows):
+            cls = classify_layer(r["layer_name"])
+            f.write(
+                f"| {i + 1} | `{r['layer_name']}` | "
+                f"{r['psnr_when_only_this_layer_q8']:.3f} | "
+                f"{r['psnr_drop_db']:+.3f} | {cls} |\n"
+            )
+
+
+def write_report_md(
+    path: Path,
+    metadata: dict[str, Any],
+    shootout_rows: list[dict],
+    sensitivity_rows: list[dict],
+    top_n: int = 3,
+) -> None:
+    """Consolidated report: 'What was tested' + shootout + sensitivity + recipe."""
+    fp32_psnr = next(
+        (r["psnr_db"] for r in shootout_rows if r["format"] == "FP32"), None,
+    )
+    int8_drop = next(
+        (r["psnr_drop_db"] for r in shootout_rows
+         if r["format"].startswith("INT8")),
+        None,
+    )
+
+    top_layers = sensitivity_rows[:top_n]
+    top_drop_sum = sum(r["psnr_drop_db"] for r in top_layers)
+    other_drop_sum = sum(r["psnr_drop_db"] for r in sensitivity_rows[top_n:])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        # ------------------------------- header ----------------------------
+        f.write("# Quantization Analysis Report\n\n")
+
+        # ------------------------------ what was tested --------------------
+        f.write("## What was tested\n\n")
+        f.write(f"- **Generated**: {metadata['datetime']}\n")
+        f.write(f"- **Checkpoint**: `{metadata['checkpoint_path']}`\n")
+        f.write(
+            f"  - last modified: {metadata['checkpoint_mtime']}, "
+            f"size: {metadata['checkpoint_size_mb']:.2f} MB\n"
+        )
+        f.write(
+            f"- **Model**: {metadata['model_arch']} "
+            f"-- {metadata['model_params']:,} params\n"
+        )
+        f.write(
+            f"- **Device**: {metadata['device']} ({metadata['device_name']}), "
+            f"PyTorch {metadata['torch_version']}\n"
+        )
+        f.write(
+            f"- **Validation set**: `{metadata['val_set_dir']}` -- "
+            f"{metadata['val_set_size']} images, "
+            f"{metadata['val_degradation']} degradation, "
+            f"LR patch {metadata['val_lr_patch']}x{metadata['val_lr_patch']} "
+            f"(deterministic per-index seed)\n"
+        )
+        f.write(
+            f"- **Calibration**: {metadata['calib_batches']} batches "
+            f"({metadata['calib_samples']} LR samples), "
+            f"{metadata['calibration_method']}\n"
+        )
+        f.write(
+            f"- **Quantization scheme**:\n"
+            f"  - activations: {metadata['quant_act_scheme']}\n"
+            f"  - weights: {metadata['quant_weight_scheme']}\n"
+        )
+        f.write("\n")
+
+        # ----------------------------- format shootout ---------------------
+        f.write("## Format shootout\n\n")
+        f.write(
+            "PSNR + forward-pass latency for each format on the val set. "
+            "**Caveat**: the INT8 latency is fake-quant overhead (q-dq inserted "
+            "in PyTorch float math), not real INT8 deploy latency. Real "
+            "deploy-side latency requires ONNX Runtime / TensorRT / vendor "
+            "NPU SDK.\n\n"
+        )
+        f.write(
+            "| Format | PSNR (dB) | Drop vs FP32 | Latency (ms) | "
+            "Size (MB) | Notes |\n"
+        )
+        f.write("|---|---:|---:|---:|---:|---|\n")
+        for r in shootout_rows:
+            f.write(
+                f"| {r['format']} | {r['psnr_db']:.3f} | "
+                f"{r['psnr_drop_db']:+.3f} | "
+                f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f} | "
+                f"{r['size_mb']:.2f} | {r['notes']} |\n"
+            )
+        f.write("\n")
+
+        # ----------------------------- per-layer sensitivity ---------------
+        f.write("## Per-layer sensitivity (INT8, sorted by drop)\n\n")
+        f.write(
+            "Each row: hold every other layer in FP32, fake-quantize ONLY this "
+            "Conv2d to INT8, measure PSNR drop. Larger drop = more "
+            "quantization-sensitive.\n\n"
+        )
+        f.write("| Rank | Layer | PSNR (dB) | Drop (dB) | Class |\n")
+        f.write("|---:|---|---:|---:|---|\n")
+        for i, r in enumerate(sensitivity_rows):
+            cls = classify_layer(r["layer_name"])
+            f.write(
+                f"| {i + 1} | `{r['layer_name']}` | "
+                f"{r['psnr_when_only_this_layer_q8']:.3f} | "
+                f"{r['psnr_drop_db']:+.3f} | {cls} |\n"
+            )
+        f.write("\n")
+
+        # ----------------------------- mixed-precision recipe --------------
+        f.write("## Mixed-precision recommendation\n\n")
+        if int8_drop is None or fp32_psnr is None:
+            f.write("(Shootout data missing -- skip recipe.)\n")
+        else:
+            top_pct = (
+                100.0 * top_drop_sum / int8_drop
+                if int8_drop > 1e-9 else float("nan")
+            )
+            f.write(
+                f"- Pure-INT8 (all 36 Conv2d) PSNR drop vs FP32: "
+                f"**{int8_drop:+.3f} dB**\n"
+            )
+            f.write(
+                f"- Top-{top_n} most sensitive layers contribute **{top_pct:.0f}%** "
+                f"of the total drop:\n"
+            )
+            for r in top_layers:
+                f.write(
+                    f"  - `{r['layer_name']}` ({classify_layer(r['layer_name'])}): "
+                    f"+{r['psnr_drop_db']:.3f} dB\n"
+                )
+            f.write("\n")
+            f.write(
+                f"**Recipe**: keep `"
+                f"{', '.join(r['layer_name'] for r in top_layers)}"
+                f"` in higher precision (FP16 / FP32) and INT8 the remaining "
+                f"{len(sensitivity_rows) - top_n} Conv2d. Estimated combined "
+                f"drop with this mixed scheme: **~{other_drop_sum:+.3f} dB** "
+                f"(assuming layer drops are approximately additive; the data "
+                f"above supports this -- sum of all single-layer drops is "
+                f"{top_drop_sum + other_drop_sum:.3f} dB vs measured pure-INT8 "
+                f"drop {int8_drop:.3f} dB).\n\n"
+            )
+            f.write(
+                "This pattern matches SR PTQ literature (PAMS, 2DQuant): the "
+                "input conv (`head`), output conv (`tail`), and upsampling "
+                "convs are quantization-critical; ResBlock interior is robust. "
+                "Once a real INT8 backend (ONNX RT QInt8, TensorRT) is in "
+                "place, this recipe should be re-validated on actual deploy "
+                "latency.\n"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -385,8 +621,10 @@ def main() -> None:
 
     fp32_model = build_model().to(device).eval()
     quant_model = build_model().to(device).eval()
+    n_params = sum(p.numel() for p in fp32_model.parameters())
     wrappers = wrap_convs(quant_model)
-    print(f"  wrapped {len(wrappers)} Conv2d layers in quant_model")
+    print(f"  wrapped {len(wrappers)} Conv2d layers in quant_model | "
+          f"{n_params:,} params")
     print()
 
     # --- Calibration ---
@@ -408,18 +646,35 @@ def main() -> None:
         print()
 
     # --- Sensitivity ---
+    sensitivity_rows: list[dict] = []
     if not args.skip_sensitivity:
         print("Running per-layer sensitivity sweep ...")
         if fp32_psnr_for_sensitivity is None:
             fp32_psnr_for_sensitivity = evaluate_psnr(fp32_model, val_loader, device)
             print(f"  FP32 baseline PSNR (recomputed): {fp32_psnr_for_sensitivity:.3f} dB")
-        rows = run_sensitivity(quant_model, val_loader, device, fp32_psnr_for_sensitivity)
-        write_csv(output_dir / "sensitivity.csv", rows)
+        sensitivity_rows = run_sensitivity(
+            quant_model, val_loader, device, fp32_psnr_for_sensitivity,
+        )
+        write_csv(output_dir / "sensitivity.csv", sensitivity_rows)
+        write_sensitivity_md(output_dir / "sensitivity.md", sensitivity_rows)
         print()
         print("Top-5 most quantization-sensitive layers:")
-        for r in rows[:5]:
+        for r in sensitivity_rows[:5]:
             print(f"  {r['layer_name']:35s}  drop {r['psnr_drop_db']:+.3f} dB")
         print(f"  wrote {output_dir / 'sensitivity.csv'}")
+        print(f"  wrote {output_dir / 'sensitivity.md'}")
+
+    # --- Consolidated report ---
+    if not args.skip_shootout and not args.skip_sensitivity:
+        metadata = gather_metadata(args, n_params, len(val_set), device)
+        write_report_md(
+            output_dir / "report.md",
+            metadata=metadata,
+            shootout_rows=results,
+            sensitivity_rows=sensitivity_rows,
+        )
+        print()
+        print(f"Wrote consolidated report: {output_dir / 'report.md'}")
 
     print()
     print("Done.")

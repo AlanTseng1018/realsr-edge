@@ -1,0 +1,190 @@
+{
+  "datetime": "2026-04-28T16:39:32",
+  "source": {
+    "checkpoint_path": "results\\runs\\20260427_143542_ep200_b16_scale2_realistic\\checkpoints\\best.pt",
+    "checkpoint_mtime": "2026-04-28T10:19:45",
+    "checkpoint_size_mb": 15.746099472045898,
+    "model_arch": "EDSR(scale_factor=2, n_resblocks=16, n_feats=64)",
+    "model_params": 1369859,
+    "device": "cuda",
+    "device_name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "torch_version": "2.6.0+cu124",
+    "onnx_version": "1.21.0",
+    "ort_version": "1.25.0"
+  },
+  "calibration": {
+    "val_set_dir": "data\\DIV2K\\DIV2K_valid_HR",
+    "val_set_size": 100,
+    "n_samples": 64,
+    "batch_size": 8,
+    "patch_size": 96
+  },
+  "int8_quantization": {
+    "tool": "onnxruntime.quantization.quantize_static",
+    "quant_format": "QDQ",
+    "activation_type": "QInt8 (symmetric per-tensor)",
+    "weight_type": "QInt8 (symmetric per-channel)",
+    "per_channel": true,
+    "reduce_range": false
+  },
+  "verification_shapes": [
+    [
+      1,
+      3,
+      96,
+      96
+    ],
+    [
+      1,
+      3,
+      64,
+      64
+    ],
+    [
+      1,
+      3,
+      128,
+      64
+    ]
+  ],
+  "artifacts": [
+    {
+      "path": "results\\onnx_exports\\edsr_200ep\\edsr_fp32.onnx",
+      "path_relative": "edsr_fp32.onnx",
+      "precision": "FP32",
+      "size_mb": 5.239441871643066,
+      "verification": {
+        "ort_provider": "CUDAExecutionProvider",
+        "atol": 0.0001,
+        "passed": true,
+        "per_shape": [
+          {
+            "shape": [
+              1,
+              3,
+              96,
+              96
+            ],
+            "max_abs_diff": 0.0,
+            "max_rel_diff": 0.0,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              64,
+              64
+            ],
+            "max_abs_diff": 0.0,
+            "max_rel_diff": 0.0,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              128,
+              64
+            ],
+            "max_abs_diff": 0.0,
+            "max_rel_diff": 0.0,
+            "passed": true
+          }
+        ]
+      }
+    },
+    {
+      "path": "results\\onnx_exports\\edsr_200ep\\edsr_fp16.onnx",
+      "path_relative": "edsr_fp16.onnx",
+      "precision": "FP16",
+      "size_mb": 2.631715774536133,
+      "verification": {
+        "ort_provider": "CUDAExecutionProvider",
+        "atol": 0.05,
+        "passed": true,
+        "per_shape": [
+          {
+            "shape": [
+              1,
+              3,
+              96,
+              96
+            ],
+            "max_abs_diff": 0.0009219646453857422,
+            "max_rel_diff": 0.14166687428951263,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              64,
+              64
+            ],
+            "max_abs_diff": 0.0008805394172668457,
+            "max_rel_diff": 0.004568916745483875,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              128,
+              64
+            ],
+            "max_abs_diff": 0.0009292364120483398,
+            "max_rel_diff": 0.007473466917872429,
+            "passed": true
+          }
+        ]
+      }
+    },
+    {
+      "path": "results\\onnx_exports\\edsr_200ep\\edsr_int8_static.onnx",
+      "path_relative": "edsr_int8_static.onnx",
+      "precision": "INT8 (static PTQ)",
+      "size_mb": 1.4141578674316406,
+      "verification": {
+        "ort_provider": "CUDAExecutionProvider",
+        "atol": 0.1,
+        "passed": true,
+        "per_shape": [
+          {
+            "shape": [
+              1,
+              3,
+              96,
+              96
+            ],
+            "max_abs_diff": 0.026751697063446045,
+            "max_rel_diff": 10.992149353027344,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              64,
+              64
+            ],
+            "max_abs_diff": 0.0266152024269104,
+            "max_rel_diff": 0.20664435625076294,
+            "passed": true
+          },
+          {
+            "shape": [
+              1,
+              3,
+              128,
+              64
+            ],
+            "max_abs_diff": 0.027007341384887695,
+            "max_rel_diff": 0.2875761389732361,
+            "passed": true
+          }
+        ]
+      }
+    }
+  ]
+}
