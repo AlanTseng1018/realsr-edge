@@ -7,7 +7,7 @@ Single execution node of the multi-precision ONNX export pipeline. All three ONN
 - **Checkpoint**: `results\runs\20260427_143542_ep200_b16_scale2_realistic\checkpoints\best.pt`
   - mtime: 2026-04-28T10:19:45, size: 15.75 MB
 - **Model**: EDSR(scale_factor=2, n_resblocks=16, n_feats=64) -- 1,369,859 params
-- **Generated**: 2026-04-28T16:39:32
+- **Generated**: 2026-04-30T01:00:12
 - **Device used for verification**: cuda (NVIDIA GeForce RTX 3060 Laptop GPU)
 - **PyTorch**: 2.6.0+cu124, **ONNX**: 1.21.0, **ORT**: 1.25.0
 
@@ -23,7 +23,7 @@ Single execution node of the multi-precision ONNX export pipeline. All three ONN
 |---|---:|:---:|
 | `edsr_fp32.onnx` | 5.24 | PASS (atol=1e-04) |
 | `edsr_fp16.onnx` | 2.63 | PASS (atol=5e-02) |
-| `edsr_int8_static.onnx` | 1.41 | PASS (atol=1e-01) |
+| `edsr_int8_static.onnx` | 1.43 | PASS (atol=1e-01) |
 
 Per-shape numeric diffs are in `verification.md`. The raw shape and size info is in `metadata.json` for programmatic consumption.
 

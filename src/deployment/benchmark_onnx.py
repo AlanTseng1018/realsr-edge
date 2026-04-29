@@ -28,10 +28,31 @@ import argparse
 import csv
 import datetime
 import json
+import os
 import platform
 import time
 from pathlib import Path
 from typing import Any
+
+
+def _setup_dll_paths() -> None:
+    """Make TensorRT libs discoverable on Windows.
+
+    ORT loads ``onnxruntime_providers_tensorrt.dll`` lazily at session
+    creation. That DLL depends on ``nvinfer_*.dll`` which ships with the
+    ``tensorrt-cu12`` pip package but lives in the package directory, NOT
+    on the system PATH. Without an explicit ``add_dll_directory`` call,
+    Windows can't find it and TRT EP silently falls back to CUDA EP.
+    """
+    try:
+        import tensorrt_libs
+        os.add_dll_directory(os.path.dirname(tensorrt_libs.__file__))
+    except ImportError:
+        pass  # tensorrt-cu12 not installed; TRT EP unavailable, that's OK
+
+
+_setup_dll_paths()
+
 
 import numpy as np
 import onnxruntime as ort
@@ -57,6 +78,7 @@ def make_session(
     provider_name: str,
     trt_cache_dir: Path | None = None,
     bench_shape: tuple[int, int, int, int] | None = None,
+    max_batch: int = 1,
     input_name: str = "input",
 ) -> ort.InferenceSession | None:
     """Build an ORT session, falling back gracefully if the provider isn't available.
@@ -87,10 +109,17 @@ def make_session(
                 "trt_engine_cache_path": str(trt_cache_dir),
             }
             if bench_shape is not None:
-                shape_str = f"{input_name}:{'x'.join(str(d) for d in bench_shape)}"
-                opts["trt_profile_min_shapes"] = shape_str
-                opts["trt_profile_opt_shapes"] = shape_str
-                opts["trt_profile_max_shapes"] = shape_str
+                # TRT needs an explicit shape range. We use the bench_shape for
+                # min/opt (latency benchmark uses this exact shape, hot path),
+                # and bump max to ``max_batch`` so PSNR eval batches still fit.
+                # Without this, a session built for batch=1 fails when val
+                # eval feeds batch=8.
+                _, c, h, w = bench_shape
+                bench_str = f"{input_name}:{'x'.join(str(d) for d in bench_shape)}"
+                max_str = f"{input_name}:{max_batch}x{c}x{h}x{w}"
+                opts["trt_profile_min_shapes"] = bench_str
+                opts["trt_profile_opt_shapes"] = bench_str
+                opts["trt_profile_max_shapes"] = max_str
             chosen.append((p, opts))
         else:
             chosen.append(p)
@@ -394,6 +423,7 @@ def main() -> None:
                 onnx_path, provider,
                 trt_cache_dir=trt_cache_dir if provider == "tensorrt" else None,
                 bench_shape=args.bench_shape,
+                max_batch=args.batch_size,
             )
             sess_build_ms = (time.perf_counter() - sess_t0) * 1000.0
 

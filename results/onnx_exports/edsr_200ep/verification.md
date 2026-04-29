@@ -34,7 +34,7 @@ Each ONNX file is compared against the PyTorch reference on the same random inpu
 
 | Shape | max abs diff | max rel diff | Passed |
 |---|---:|---:|:---:|
-| (1, 3, 96, 96) | 2.68e-02 | 1.10e+01 | PASS |
-| (1, 3, 64, 64) | 2.66e-02 | 2.07e-01 | PASS |
-| (1, 3, 128, 64) | 2.70e-02 | 2.88e-01 | PASS |
+| (1, 3, 96, 96) | 3.15e-02 | 2.12e+01 | PASS |
+| (1, 3, 64, 64) | 2.74e-02 | 1.31e-01 | PASS |
+| (1, 3, 128, 64) | 3.11e-02 | 2.17e-01 | PASS |
 

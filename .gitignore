@@ -38,3 +38,8 @@ Thumbs.db
 # C++ build / vendored single-header libs
 cpp_inference/build/
 cpp_inference/third_party/stb/*.h
+
+# TensorRT engine caches (hardware-specific build artifacts, NOT portable
+# across GPU model / SM version / TRT version -- see deployment_lessons_learned.md L5)
+**/trt_engine_cache/
+**/_trt_test_cache/

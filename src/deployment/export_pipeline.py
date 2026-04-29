@@ -60,6 +60,7 @@ from onnxruntime.quantization import (
     QuantType,
     quantize_static,
 )
+from onnxruntime.quantization.shape_inference import quant_pre_process
 
 from src.data.dataset import SRDataset
 from src.models.edsr import EDSR
@@ -171,15 +172,33 @@ def quantize_static_int8(
     """Run ORT's static PTQ to produce a QDQ-format INT8 ONNX.
 
     Settings:
+      * **Pre-process the FP32 ONNX first** (``quant_pre_process``) -- runs
+        ONNX shape inference and symbolic shape prop. Without this, TensorRT
+        rejects the resulting INT8 model with "input has no shape specified".
       * QDQ format -- the ONNX standard quantization layout, supported by
         most edge runtimes (ORT, TensorRT, OpenVINO, vendor SDKs).
-      * Symmetric INT8 for both activations and weights, per-channel weights.
-        This matches our PyTorch fake-quant scheme so the accuracy comparison
-        is apples-to-apples.
+      * **Symmetric** INT8 for both activations and weights, per-channel
+        weights. ``ActivationSymmetric=True`` + ``WeightSymmetric=True`` is
+        what makes the result TensorRT-compatible: TRT's INT8 path doesn't
+        support non-zero zero-point asymmetric quantization (except on DLA).
+        It also matches our PyTorch fake-quant scheme so the accuracy
+        comparison is apples-to-apples.
     """
     int8_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: pre-process for shape inference (required by TensorRT).
+    preprocessed_path = int8_path.with_name(fp32_path.stem + "_preprocessed.onnx")
+    quant_pre_process(
+        input_model_path=str(fp32_path),
+        output_model_path=str(preprocessed_path),
+        skip_optimization=False,
+        skip_onnx_shape=False,
+        skip_symbolic_shape=False,
+    )
+
+    # Step 2: quantize the preprocessed model with symmetric scheme.
     quantize_static(
-        model_input=str(fp32_path),
+        model_input=str(preprocessed_path),
         model_output=str(int8_path),
         calibration_data_reader=calibration_reader,
         quant_format=QuantFormat.QDQ,
@@ -187,7 +206,15 @@ def quantize_static_int8(
         weight_type=QuantType.QInt8,
         per_channel=True,
         reduce_range=False,
+        extra_options={
+            "ActivationSymmetric": True,
+            "WeightSymmetric": True,
+        },
     )
+
+    # Clean up intermediate file.
+    if preprocessed_path.exists():
+        preprocessed_path.unlink()
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,11 @@ onnx
 onnxruntime-gpu
 onnxconverter-common
 
+# TensorRT EP for ONNX Runtime (real INT8 GPU latency benchmark).
+# Ships nvinfer DLLs that ORT's TensorrtExecutionProvider depends on;
+# without this, ORT silently falls back to CUDA EP at session creation.
+tensorrt-cu12
+
 # torch.compile on Windows needs Triton, which has no official Windows wheels.
 triton-windows<3.3 ; sys_platform == "win32"
 
