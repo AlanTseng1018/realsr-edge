@@ -80,12 +80,12 @@ SCHEME_COLORS: dict[str, str] = {
 # This is hard-coded for EDSR-baseline (16 ResBlocks). If the architecture
 # changes, this list should change too.
 REPRESENTATIVE_LAYERS: list[str] = [
-    "head",
-    "upsampler.0",
     "tail",
-    "body.0.conv1",
-    "body.8.conv1",
+    "upsampler.0",
+    "head",
+    "body.16",
     "body.15.conv2",
+    "body.4.conv1",
 ]
 
 
@@ -231,6 +231,7 @@ def plot_histograms(
     layer_names: list[str],
     amax_per_scheme: dict[str, dict[str, float]],
     output_path: Path,
+    psnr_per_scheme: dict[str, float] | None = None,
 ) -> None:
     """2x3 subplot: activation histogram + amax markers per scheme.
 
@@ -273,9 +274,12 @@ def plot_histograms(
             if v is None:
                 continue
             color = SCHEME_COLORS.get(scheme_name, "black")
+            psnr_str = ""
+            if psnr_per_scheme and scheme_name in psnr_per_scheme:
+                psnr_str = f"  PSNR {psnr_per_scheme[scheme_name]:.3f} dB"
             ax.axvline(
                 v, color=color, linestyle="--", linewidth=1.5,
-                label=f"{scheme_name}: {v:.3f}",
+                label=f"{scheme_name}: {v:.3f}{psnr_str}",
             )
 
         ax.set_title(layer_name, fontsize=11)
@@ -446,9 +450,11 @@ def main() -> None:
     )
 
     # Histogram plot for representative layers
+    psnr_per_scheme = {r["scheme"]: r["psnr_db"] for r in rows}
     plot_histograms(
         wrappers, REPRESENTATIVE_LAYERS, amax_per_scheme,
         output_dir / "histograms.png",
+        psnr_per_scheme=psnr_per_scheme,
     )
 
     # Metadata for the report

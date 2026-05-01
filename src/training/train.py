@@ -56,6 +56,11 @@ from torch.utils.data import DataLoader
 
 from src.data.dataset import SRDataset
 from src.models.edsr import EDSR
+from src.quantization.fake_quant import (
+    apply_calibration_to_all,
+    set_all_modes,
+    wrap_convs,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +140,10 @@ def save_checkpoint(
 
 def make_run_dir(args: argparse.Namespace) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = "_qat" if args.qat else ""
     name = (
         f"{ts}_ep{args.epochs}_b{args.batch_size}"
-        f"_scale{args.scale}_{args.degradation}"
+        f"_scale{args.scale}_{args.degradation}{suffix}"
     )
     run_dir = Path(args.runs_dir) / name
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -225,6 +231,7 @@ def save_curves(
     val_psnrs: list[float],
     val_ssims: list[float],
     run_dir: Path,
+    title: str = "Training Curves",
 ) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
@@ -251,7 +258,7 @@ def save_curves(
     axes[2].set_title("Validation SSIM")
     axes[2].grid(True, alpha=0.3)
 
-    fig.suptitle("Training Curves", fontsize=14, fontweight="bold")
+    fig.suptitle(title, fontsize=14, fontweight="bold")
     plt.tight_layout()
     out = run_dir / "curves.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
@@ -321,6 +328,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-samples", type=int, default=5, help="number of val images to visualize at end")
     p.add_argument("--resume", type=str, default=None, help="path to checkpoint to resume from")
 
+    # QAT fine-tuning
+    p.add_argument("--qat", action="store_true",
+                   help="Run QAT fine-tuning after normal training (or standalone with --qat-from)")
+    p.add_argument("--qat-from", type=str, default=None,
+                   help="Checkpoint to start QAT from. Defaults to best.pt in current run.")
+    p.add_argument("--qat-epochs", type=int, default=20,
+                   help="Number of QAT fine-tuning epochs")
+    p.add_argument("--qat-lr", type=float, default=1e-5,
+                   help="Learning rate for QAT (typically 10x smaller than base LR)")
+    p.add_argument("--qat-calib-batches", type=int, default=20,
+                   help="Batches used to calibrate activation scales before QAT")
+
     # Quick smoke-test mode
     p.add_argument(
         "--quick",
@@ -340,6 +359,156 @@ def parse_args() -> argparse.Namespace:
         args.val_samples = 2
 
     return args
+
+
+def run_qat(
+    args: argparse.Namespace,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    run_dir: Path,
+    qat_from: Path,
+) -> None:
+    """QAT fine-tuning phase.
+
+    Loads a pretrained FP32 checkpoint, wraps every Conv2d with
+    CalibratingConv2d, runs a short calibration pass to set activation
+    scales, then fine-tunes in 'qat' mode (fake-quant + STE gradients).
+
+    Why STE matters
+    ---------------
+    round() has zero gradient almost everywhere. Without the
+    Straight-Through Estimator the loss gradient never reaches the weights
+    and training stalls immediately. STE approximates d(round)/dx = 1,
+    which is wrong but keeps gradients flowing — empirically it works.
+
+    Typical recipe
+    --------------
+    * Start from best FP32 checkpoint (not random init).
+    * Use 10x smaller LR than original training.
+    * Run 10-20% of original epoch count.
+    * Scales are fixed from calibration (not learned here).
+    """
+    print("\n" + "=" * 60)
+    print("  QAT Fine-tuning")
+    print("=" * 60)
+    print(f"  starting from : {qat_from}")
+    print(f"  qat epochs    : {args.qat_epochs}")
+    print(f"  qat lr        : {args.qat_lr}")
+    print(f"  calib batches : {args.qat_calib_batches}")
+
+    # Load pretrained weights into a fresh model
+    ckpt = torch.load(str(qat_from), map_location=device, weights_only=False)
+    state = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
+    train_args = ckpt.get("args", {})
+    n_feats     = (train_args.get("n_feats") if isinstance(train_args, dict) else None) or args.n_feats
+    n_resblocks = (train_args.get("n_resblocks") if isinstance(train_args, dict) else None) or args.n_resblocks
+
+    model = EDSR(scale_factor=args.scale, n_resblocks=n_resblocks, n_feats=n_feats).to(device)
+    model.load_state_dict(state, strict=True)
+
+    # Wrap all Conv2d with CalibratingConv2d
+    wrappers = wrap_convs(model)
+    print(f"  wrapped {len(wrappers)} Conv2d layers")
+
+    # Calibration pass — establish activation scales
+    print(f"\n  [1/3] Calibrating ({args.qat_calib_batches} batches) ...")
+    set_all_modes(wrappers, "calibrate")
+    model.eval()
+    with torch.no_grad():
+        for i, (lr_batch, _) in enumerate(train_loader):
+            if i >= args.qat_calib_batches:
+                break
+            model(lr_batch.to(device, non_blocking=True))
+    apply_calibration_to_all(wrappers, method="max-abs")
+
+    # Verify calibration: PSNR in quantize mode before fine-tuning
+    set_all_modes(wrappers, "quantize")
+    psnr_before, ssim_before = evaluate_metrics(model, val_loader, device)
+    print(f"  PSNR before QAT : {psnr_before:.2f} dB  SSIM {ssim_before:.4f}")
+
+    # Switch to QAT mode and fine-tune
+    set_all_modes(wrappers, "qat")
+    model.train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.qat_lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.qat_epochs, eta_min=args.qat_lr * 0.1
+    )
+    criterion = nn.L1Loss()
+
+    qat_dir = run_dir / "checkpoints"
+    best_psnr = psnr_before
+
+    qat_epochs_list: list[int]   = []
+    qat_losses:      list[float] = []
+    qat_psnrs:       list[float] = []
+    qat_ssims:       list[float] = []
+
+    print(f"\n  [2/3] Fine-tuning ({args.qat_epochs} epochs) ...")
+    for epoch in range(args.qat_epochs):
+        model.train()
+        set_all_modes(wrappers, "qat")
+        epoch_loss = 0.0
+        for lr_batch, hr_batch in train_loader:
+            lr_batch = lr_batch.to(device, non_blocking=True)
+            hr_batch = hr_batch.to(device, non_blocking=True)
+            sr_batch = model(lr_batch)
+            loss = criterion(sr_batch, hr_batch)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+
+        scheduler.step()
+        avg_loss = epoch_loss / len(train_loader)
+
+        # Validate in quantize mode (not qat mode) for clean measurement
+        set_all_modes(wrappers, "quantize")
+        psnr, ssim = evaluate_metrics(model, val_loader, device)
+        tag = "*** best" if psnr > best_psnr else ""
+        print(f"  qat ep {epoch+1:3d} | loss {avg_loss:.4f} | "
+              f"PSNR {psnr:.2f} dB | SSIM {ssim:.4f}  {tag}")
+
+        qat_epochs_list.append(epoch + 1)
+        qat_losses.append(avg_loss)
+        qat_psnrs.append(psnr)
+        qat_ssims.append(ssim)
+
+        if psnr > best_psnr:
+            best_psnr = psnr
+            torch.save({
+                "model": state_dict_for_save(model),
+                "epoch_qat": epoch,
+                "best_psnr": best_psnr,
+                "args": vars(args),
+                "qat": True,
+            }, qat_dir / "best_qat.pt")
+
+    # Final summary
+    set_all_modes(wrappers, "quantize")
+    psnr_after, ssim_after = evaluate_metrics(model, val_loader, device)
+    print(f"\n  [3/3] QAT complete")
+    print(f"  PSNR before : {psnr_before:.2f} dB  SSIM {ssim_before:.4f}")
+    print(f"  PSNR after  : {psnr_after:.2f} dB  SSIM {ssim_after:.4f}  "
+          f"({'↑' if psnr_after >= psnr_before else '↓'}"
+          f"{abs(psnr_after - psnr_before):.2f} dB)")
+    print(f"  best_qat.pt → {qat_dir / 'best_qat.pt'}")
+
+    save_curves(qat_epochs_list, qat_losses, qat_epochs_list,
+                qat_psnrs, qat_ssims, run_dir,
+                title="QAT Fine-tuning Curves (fake-INT8)")
+    save_metrics_csv(qat_epochs_list, qat_losses, qat_psnrs, qat_ssims, run_dir)
+
+    # Val samples — run in quantize mode so images reflect fake-INT8 quality
+    val_set = SRDataset(
+        hr_dir=Path(args.data_root) / args.val_dir,
+        scale=args.scale,
+        hr_patch_size=args.patch_size * args.scale,
+        degradation=args.degradation,
+        is_train=False,
+    )
+    save_val_samples(model, val_set, run_dir, device, n_samples=args.val_samples)
 
 
 def main() -> None:
@@ -518,11 +687,16 @@ def main() -> None:
 
     save_metrics_csv(val_epoch_nums, all_losses, val_psnrs, val_ssims, run_dir)
     save_curves(all_epoch_nums, all_losses, val_epoch_nums, val_psnrs, val_ssims, run_dir)
-    save_val_samples(model, val_set, run_dir, device, n_samples=args.val_samples)
+    if args.epochs > 0:
+        save_val_samples(model, val_set, run_dir, device, n_samples=args.val_samples)
 
     print()
     print(f"Training complete. Best val PSNR: {best_psnr:.2f} dB")
     print(f"Run artifacts in: {run_dir}")
+
+    if args.qat:
+        qat_ckpt = Path(args.qat_from) if args.qat_from else ckpt_dir / "best.pt"
+        run_qat(args, train_loader, val_loader, device, run_dir, qat_ckpt)
 
 
 if __name__ == "__main__":

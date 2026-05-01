@@ -1,0 +1,113 @@
+{
+  "fp32_baseline": 27.4386,
+  "int8_baseline": 27.3584,
+  "sweep": [
+    {
+      "n_fp32_layers": 0,
+      "fp32_layers": [],
+      "psnr": 27.3584,
+      "drop_vs_fp32": 0.0801,
+      "recovered_pct": 0.0
+    },
+    {
+      "n_fp32_layers": 1,
+      "fp32_layers": [
+        "tail"
+      ],
+      "psnr": 27.3873,
+      "drop_vs_fp32": 0.0513,
+      "recovered_pct": 36.0
+    },
+    {
+      "n_fp32_layers": 2,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0"
+      ],
+      "psnr": 27.4054,
+      "drop_vs_fp32": 0.0332,
+      "recovered_pct": 58.6
+    },
+    {
+      "n_fp32_layers": 3,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head"
+      ],
+      "psnr": 27.4215,
+      "drop_vs_fp32": 0.0171,
+      "recovered_pct": 78.6
+    },
+    {
+      "n_fp32_layers": 4,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16"
+      ],
+      "psnr": 27.4284,
+      "drop_vs_fp32": 0.0102,
+      "recovered_pct": 87.2
+    },
+    {
+      "n_fp32_layers": 5,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2"
+      ],
+      "psnr": 27.4294,
+      "drop_vs_fp32": 0.0092,
+      "recovered_pct": 88.5
+    },
+    {
+      "n_fp32_layers": 6,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2"
+      ],
+      "psnr": 27.43,
+      "drop_vs_fp32": 0.0086,
+      "recovered_pct": 89.3
+    },
+    {
+      "n_fp32_layers": 7,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2",
+        "body.14.conv2"
+      ],
+      "psnr": 27.4306,
+      "drop_vs_fp32": 0.0079,
+      "recovered_pct": 90.1
+    },
+    {
+      "n_fp32_layers": 8,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2",
+        "body.14.conv2",
+        "body.12.conv2"
+      ],
+      "psnr": 27.4312,
+      "drop_vs_fp32": 0.0074,
+      "recovered_pct": 90.8
+    }
+  ]
+}

@@ -135,6 +135,7 @@ def export_fp32_onnx(
         input_names=["input"],
         output_names=["output"],
         dynamic_axes=dyn_axes,
+        dynamo=False,
     )
     onnx.checker.check_model(onnx.load(str(output_path)), full_check=True)
 

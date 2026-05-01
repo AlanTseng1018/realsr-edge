@@ -38,6 +38,25 @@ from torch import Tensor, nn
 INT8_QMIN, INT8_QMAX = -128, 127
 
 
+class _STERound(torch.autograd.Function):
+    """Round with Straight-Through Estimator for QAT.
+
+    Forward : round(x).clamp(qmin, qmax)  — same as PTQ
+    Backward: pass gradient straight through (treat round as identity)
+
+    Without STE, round() has zero gradient almost everywhere and training
+    stalls immediately. STE is the standard approximation used by every
+    QAT framework (PyTorch native, TensorFlow, brevitas, etc.).
+    """
+    @staticmethod
+    def forward(ctx, x: Tensor, qmin: int, qmax: int) -> Tensor:
+        return x.round().clamp(qmin, qmax)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        return grad, None, None   # straight-through; no grad for qmin/qmax
+
+
 def quantize_dequantize_per_tensor(
     x: Tensor,
     scale: Tensor,
@@ -46,6 +65,17 @@ def quantize_dequantize_per_tensor(
 ) -> Tensor:
     """Symmetric per-tensor q-dq. ``scale`` is a 0-d tensor."""
     q = (x / scale).round().clamp(qmin, qmax)
+    return q * scale
+
+
+def quantize_dequantize_per_tensor_ste(
+    x: Tensor,
+    scale: Tensor,
+    qmin: int = INT8_QMIN,
+    qmax: int = INT8_QMAX,
+) -> Tensor:
+    """Same as above but with STE — use this during QAT fine-tuning."""
+    q = _STERound.apply(x / scale, qmin, qmax)
     return q * scale
 
 
@@ -65,6 +95,21 @@ def quantize_dequantize_per_channel(
     shape[ch_axis] = -1
     s = scale.view(shape)
     q = (w / s).round().clamp(qmin, qmax)
+    return q * s
+
+
+def quantize_dequantize_per_channel_ste(
+    w: Tensor,
+    scale: Tensor,
+    ch_axis: int = 0,
+    qmin: int = INT8_QMIN,
+    qmax: int = INT8_QMAX,
+) -> Tensor:
+    """Same as above but with STE — use this for weights during QAT."""
+    shape = [1] * w.ndim
+    shape[ch_axis] = -1
+    s = scale.view(shape)
+    q = _STERound.apply(w / s, qmin, qmax)
     return q * s
 
 
@@ -115,7 +160,7 @@ class CalibratingConv2d(nn.Module):
       :meth:`apply_calibration_method`.
     """
 
-    _VALID_MODES = ("fp32", "calibrate", "quantize")
+    _VALID_MODES = ("fp32", "calibrate", "quantize", "qat")
 
     def __init__(self, conv: nn.Conv2d, n_bins: int = 2048) -> None:
         super().__init__()
@@ -174,11 +219,25 @@ class CalibratingConv2d(nn.Module):
                 self.calibrated.fill_(True)
             return self.conv(x)
 
-        # mode == 'quantize'
+        # mode == 'quantize'  (inference / PTQ eval — no gradient needed)
+        if self.mode == "quantize":
+            a_scale = per_tensor_scale(self.input_amax)
+            x_q = quantize_dequantize_per_tensor(x, a_scale)
+            w_scale = per_channel_scale(self.conv.weight, ch_axis=0)
+            w_q = quantize_dequantize_per_channel(self.conv.weight, w_scale, ch_axis=0)
+            return F.conv2d(
+                x_q, w_q, self.conv.bias,
+                stride=self.conv.stride,
+                padding=self.conv.padding,
+                dilation=self.conv.dilation,
+                groups=self.conv.groups,
+            )
+
+        # mode == 'qat'  (QAT fine-tuning — STE keeps gradients alive)
         a_scale = per_tensor_scale(self.input_amax)
-        x_q = quantize_dequantize_per_tensor(x, a_scale)
+        x_q = quantize_dequantize_per_tensor_ste(x, a_scale)
         w_scale = per_channel_scale(self.conv.weight, ch_axis=0)
-        w_q = quantize_dequantize_per_channel(self.conv.weight, w_scale, ch_axis=0)
+        w_q = quantize_dequantize_per_channel_ste(self.conv.weight, w_scale, ch_axis=0)
         return F.conv2d(
             x_q, w_q, self.conv.bias,
             stride=self.conv.stride,
