@@ -2,26 +2,30 @@
 
 ## What was tested
 
-- **Generated**: 2026-05-01T21:54:05
+- **Generated**: 2026-05-02T16:30:00
 - **Checkpoint**: `results\runs\20260427_143542_ep200_b16_scale2_realistic\checkpoints\best.pt`
-  - last modified: 2026-04-27T15:27:43, size: 15.75 MB
+  - last modified: 2026-04-28T10:19:45, size: 15.75 MB
 - **Model**: EDSR(scale_factor=2, n_resblocks=16, n_feats=64) -- 1,369,859 params
-- **Device**: cuda (NVIDIA GeForce RTX 3090), PyTorch 2.6.0+cu124
+- **Device**: cuda (NVIDIA GeForce RTX 3060 Laptop GPU), PyTorch 2.6.0+cu124
 - **Validation set**: `data\DIV2K\DIV2K_valid_HR` -- 100 images, realistic degradation, LR patch 96x96
 - **Calibration**: 8 batches (64 LR samples)
 - **Histogram bins**: 2048
 - **Quantization scheme**: symmetric per-tensor INT8 (activations) + symmetric per-channel INT8 (weights)
 
-## Calibration scheme shootout
+## Calibration scheme shootout (accuracy only)
 
 All four schemes share the **same calibration pass** -- the histogram is collected once, and each scheme just chooses a different summary of it (running max for `max-abs`, percentile cutoff for the other three).
 
-| Scheme | PSNR (dB) | Drop vs FP32 | Latency (ms) |
-|---|---:|---:|---:|
-| max-abs | 27.362 | +0.077 | 16.42 +/- 2.09 |
-| percentile-99.99 | 27.351 | +0.087 | 15.33 +/- 1.20 |
-| percentile-99.9 | 26.937 | +0.502 | 15.41 +/- 1.52 |
-| percentile-99.0 | 25.135 | +2.304 | 15.32 +/- 1.13 |
+PSNR is the primary ranking metric; SSIM is reported alongside as a perceptual cross-check. A calibration scheme that wins PSNR but loses SSIM (or vice versa) is a red flag worth investigating before committing to deploy.
+
+**Latency is intentionally not reported here**. Calibration scheme only changes the per-tensor scale value -- it does not change op count, kernel selection, or anything that affects runtime. Any latency differences between schemes would be measurement noise, not a real deploy signal. Real per-precision latency lives in the ONNX deploy benchmark (`results/onnx_benchmark/.../deploy_summary.md`).
+
+| Scheme | PSNR (dB) | PSNR drop | SSIM | SSIM drop |
+|---|---:|---:|---:|---:|
+| max-abs | 27.364 | +0.075 | 0.7866 | +0.0041 |
+| percentile-99.99 | 27.363 | +0.075 | 0.7887 | +0.0020 |
+| percentile-99.9 | 26.986 | +0.453 | 0.7840 | +0.0066 |
+| percentile-99.0 | 25.272 | +2.166 | 0.7539 | +0.0368 |
 
 ## Per-layer chosen `amax` per scheme
 
@@ -29,42 +33,42 @@ This is the value that drives `scale = amax / 127` for each layer's input quanti
 
 | Layer | max-abs | percentile-99.99 | percentile-99.9 | percentile-99.0 |
 |---|---:|---:|---:|---:|
-| `head` | 1.0000 | 1.0000 | 0.9999 | 0.9841 |
-| `tail` | 1.9936 | 1.2206 | 1.0019 | 0.7235 |
-| `body.16` | 2.8725 | 1.5118 | 1.0375 | 0.5454 |
-| `body.0.conv1` | 1.4329 | 1.3773 | 1.1879 | 0.8766 |
-| `body.0.conv2` | 1.1014 | 0.7466 | 0.6217 | 0.4691 |
-| `body.1.conv1` | 1.2062 | 0.8678 | 0.7411 | 0.5065 |
-| `body.1.conv2` | 1.1916 | 0.5944 | 0.4077 | 0.2772 |
-| `body.2.conv1` | 1.1538 | 0.7399 | 0.5378 | 0.3517 |
-| `body.2.conv2` | 1.1563 | 0.6550 | 0.3961 | 0.1822 |
-| `body.3.conv1` | 1.2463 | 0.7182 | 0.5171 | 0.3197 |
-| `body.3.conv2` | 1.2421 | 0.6246 | 0.3918 | 0.1820 |
-| `body.4.conv1` | 1.2936 | 0.7378 | 0.5244 | 0.3190 |
-| `body.4.conv2` | 1.1257 | 0.5206 | 0.3356 | 0.1612 |
-| `body.5.conv1` | 1.3159 | 0.7674 | 0.5323 | 0.3139 |
-| `body.5.conv2` | 1.2322 | 0.6629 | 0.3472 | 0.1716 |
-| `body.6.conv1` | 1.4015 | 0.7876 | 0.5460 | 0.3192 |
-| `body.6.conv2` | 1.2362 | 0.6583 | 0.3727 | 0.1654 |
-| `body.7.conv1` | 1.4608 | 0.8014 | 0.5551 | 0.3251 |
-| `body.7.conv2` | 1.3302 | 0.5890 | 0.3069 | 0.1594 |
-| `body.8.conv1` | 1.5375 | 0.8212 | 0.5684 | 0.3305 |
-| `body.8.conv2` | 1.4275 | 0.6650 | 0.3312 | 0.1745 |
-| `body.9.conv1` | 1.6386 | 0.8794 | 0.6055 | 0.3496 |
-| `body.9.conv2` | 1.2992 | 0.7006 | 0.4002 | 0.1791 |
-| `body.10.conv1` | 1.7041 | 0.9350 | 0.6475 | 0.3726 |
-| `body.10.conv2` | 1.5172 | 0.6457 | 0.3453 | 0.1699 |
-| `body.11.conv1` | 1.8397 | 0.9839 | 0.6780 | 0.3841 |
-| `body.11.conv2` | 1.5828 | 0.7695 | 0.3797 | 0.1830 |
-| `body.12.conv1` | 1.9173 | 1.0457 | 0.7197 | 0.4035 |
-| `body.12.conv2` | 1.7914 | 0.8717 | 0.4436 | 0.2095 |
-| `body.13.conv1` | 2.2329 | 1.1530 | 0.7757 | 0.4264 |
-| `body.13.conv2` | 2.0545 | 1.0572 | 0.4916 | 0.2243 |
-| `body.14.conv1` | 2.3425 | 1.3110 | 0.8636 | 0.4630 |
-| `body.14.conv2` | 2.0186 | 0.9351 | 0.5087 | 0.2369 |
-| `body.15.conv1` | 2.6271 | 1.4320 | 0.9537 | 0.5013 |
-| `body.15.conv2` | 2.2803 | 1.1156 | 0.5947 | 0.2588 |
-| `upsampler.0` | 2.6470 | 1.5797 | 1.2382 | 0.8977 |
+| `head` | 1.0000 | 1.0000 | 0.9999 | 0.9959 |
+| `tail` | 1.8376 | 1.2213 | 1.0106 | 0.7297 |
+| `body.16` | 3.1245 | 1.5475 | 1.0721 | 0.5686 |
+| `body.0.conv1` | 1.4732 | 1.3646 | 1.1966 | 0.8880 |
+| `body.0.conv2` | 1.3181 | 0.7507 | 0.6246 | 0.4735 |
+| `body.1.conv1` | 1.2430 | 0.8783 | 0.7476 | 0.5108 |
+| `body.1.conv2` | 1.5933 | 0.6634 | 0.4138 | 0.2855 |
+| `body.2.conv1` | 1.1912 | 0.7506 | 0.5485 | 0.3562 |
+| `body.2.conv2` | 1.3021 | 0.6761 | 0.3972 | 0.1811 |
+| `body.3.conv1` | 1.2463 | 0.7355 | 0.5330 | 0.3232 |
+| `body.3.conv2` | 1.7200 | 0.7003 | 0.4212 | 0.1893 |
+| `body.4.conv1` | 1.2956 | 0.7675 | 0.5466 | 0.3257 |
+| `body.4.conv2` | 1.0149 | 0.5333 | 0.3526 | 0.1676 |
+| `body.5.conv1` | 1.3610 | 0.7917 | 0.5573 | 0.3203 |
+| `body.5.conv2` | 1.2222 | 0.6916 | 0.3687 | 0.1734 |
+| `body.6.conv1` | 1.4015 | 0.8073 | 0.5705 | 0.3289 |
+| `body.6.conv2` | 1.5073 | 0.7188 | 0.4053 | 0.1719 |
+| `body.7.conv1` | 1.5146 | 0.8344 | 0.5869 | 0.3381 |
+| `body.7.conv2` | 1.3768 | 0.6200 | 0.3317 | 0.1678 |
+| `body.8.conv1` | 1.5545 | 0.8569 | 0.5963 | 0.3425 |
+| `body.8.conv2` | 1.5857 | 0.7830 | 0.3700 | 0.1794 |
+| `body.9.conv1` | 1.7315 | 0.9124 | 0.6375 | 0.3629 |
+| `body.9.conv2` | 1.4081 | 0.7168 | 0.4005 | 0.1840 |
+| `body.10.conv1` | 1.7531 | 0.9660 | 0.6781 | 0.3862 |
+| `body.10.conv2` | 1.5539 | 0.6884 | 0.3750 | 0.1774 |
+| `body.11.conv1` | 1.9127 | 1.0087 | 0.7100 | 0.4000 |
+| `body.11.conv2` | 1.5823 | 0.7672 | 0.3888 | 0.1881 |
+| `body.12.conv1` | 2.1236 | 1.0711 | 0.7514 | 0.4206 |
+| `body.12.conv2` | 1.9389 | 0.9200 | 0.4647 | 0.2168 |
+| `body.13.conv1` | 2.3528 | 1.1762 | 0.8075 | 0.4450 |
+| `body.13.conv2` | 2.0080 | 1.0676 | 0.5072 | 0.2300 |
+| `body.14.conv1` | 2.5995 | 1.3390 | 0.8931 | 0.4829 |
+| `body.14.conv2` | 2.0696 | 0.9556 | 0.5333 | 0.2474 |
+| `body.15.conv1` | 2.7809 | 1.4551 | 0.9853 | 0.5215 |
+| `body.15.conv2` | 2.5023 | 1.1547 | 0.6279 | 0.2680 |
+| `upsampler.0` | 2.7222 | 1.6036 | 1.2464 | 0.9100 |
 
 ## How to read the histogram figure
 
@@ -79,7 +83,9 @@ Y-axis is log-scale because activation distributions are heavily long-tailed -- 
 
 ## Takeaway
 
-On this checkpoint and val set, **`max-abs`** wins the shootout (27.362 dB). The spread across schemes is 2.227 dB.
+On this checkpoint and val set, **`max-abs`** wins on PSNR (27.364 dB) and **`percentile-99.99`** wins on SSIM (0.7887). PSNR spread across schemes: 2.091 dB; SSIM spread: 0.0348.
+
+**Mismatch**: PSNR prefers `max-abs` but SSIM prefers `percentile-99.99`. Inspect the histograms before committing -- this usually means one scheme preserves bulk pixel fidelity while the other preserves edge / structure better. Pick based on the deploy use-case (broadcast quality -> SSIM-leaning; benchmark scoring -> PSNR-leaning).
 
 Interpret carefully:
 

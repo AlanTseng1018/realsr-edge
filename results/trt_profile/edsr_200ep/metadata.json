@@ -1,0 +1,70 @@
+{
+  "datetime": "2026-05-05T10:36:32",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "peak_fp32_tflops": 10.94,
+    "peak_fp16_tflops": 21.9,
+    "peak_int8_tops": 43.7,
+    "mem_bw_gbs": 336.2
+  },
+  "bench_shape": [
+    1,
+    3,
+    96,
+    96
+  ],
+  "flops_info": {
+    "total_flops": 25344958464,
+    "total_params": 1369859,
+    "n_feats": 64,
+    "n_resblocks": 16,
+    "scale": 2
+  },
+  "results": [
+    {
+      "precision": "FP32",
+      "latency_ms": 3.165177001953125,
+      "achieved_gflops": 8007.437956348246,
+      "ai": 310.8671593090277,
+      "flops": 25344958464,
+      "mem_traffic": {
+        "input_bytes": 110592,
+        "output_bytes": 442368,
+        "activation_bytes": 75497472,
+        "weight_bytes": 5479436,
+        "total_bytes": 81529868,
+        "arithmetic_intensity": 310.8671593090277
+      }
+    },
+    {
+      "precision": "FP16",
+      "latency_ms": 1.3788018798828126,
+      "achieved_gflops": 18381.871125787937,
+      "ai": 617.545936989403,
+      "flops": 25344958464,
+      "mem_traffic": {
+        "input_bytes": 110592,
+        "output_bytes": 442368,
+        "activation_bytes": 37748736,
+        "weight_bytes": 2739718,
+        "total_bytes": 41041414,
+        "arithmetic_intensity": 617.545936989403
+      }
+    },
+    {
+      "precision": "INT8",
+      "latency_ms": 0.9069158172607422,
+      "achieved_gflops": 27946.318700838376,
+      "ai": 1218.672432189988,
+      "flops": 25344958464,
+      "mem_traffic": {
+        "input_bytes": 110592,
+        "output_bytes": 442368,
+        "activation_bytes": 18874368,
+        "weight_bytes": 1369859,
+        "total_bytes": 20797187,
+        "arithmetic_intensity": 1218.672432189988
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+n_fp32_layers,psnr,drop_vs_fp32,recovered_pct,ssim,ssim_drop_vs_fp32,ssim_recovered_pct,fp32_layers
+0,27.4459,0.0552,0.0,0.789305,0.003923,0.0,
+1,27.4679,0.0333,39.7,0.791136,0.002093,46.7,tail
+2,27.4846,0.0166,69.9,0.792352,0.000876,77.7,tail|upsampler.0
+3,27.4845,0.0167,69.8,0.792101,0.001127,71.3,tail|upsampler.0|head
+4,27.4925,0.0087,84.2,0.792673,0.000555,85.8,tail|upsampler.0|head|body.16
+5,27.4935,0.0077,86.0,0.792737,0.000491,87.5,tail|upsampler.0|head|body.16|body.15.conv2
+6,27.4942,0.007,87.3,0.792786,0.000442,88.7,tail|upsampler.0|head|body.16|body.15.conv2|body.13.conv2
+7,27.4948,0.0064,88.4,0.792834,0.000394,90.0,tail|upsampler.0|head|body.16|body.15.conv2|body.13.conv2|body.14.conv2
+8,27.4955,0.0057,89.7,0.792864,0.000364,90.7,tail|upsampler.0|head|body.16|body.15.conv2|body.13.conv2|body.14.conv2|body.12.conv2

@@ -15,11 +15,7 @@ one benchmark execution node.
 
 Run example::
 
-    python -m src.deployment.benchmark_onnx \\
-        --onnx-dir results/onnx_exports/edsr_200ep \\
-        --output-dir results/onnx_benchmark/edsr_200ep \\
-        --providers cuda cpu \\
-        --bench-shape 1x3x96x96
+    python -m src.deployment.benchmark_onnx --onnx-dir results/onnx_exports/edsr_200ep --output-dir results/onnx_benchmark/edsr_200ep --providers cuda cpu --bench-shape 1x3x96x96
 """
 
 from __future__ import annotations
@@ -57,6 +53,7 @@ _setup_dll_paths()
 import numpy as np
 import onnxruntime as ort
 import torch
+from skimage.metrics import structural_similarity as ssim_fn
 from torch.utils.data import DataLoader
 
 from src.data.dataset import SRDataset
@@ -146,16 +143,20 @@ def session_input_dtype(session: ort.InferenceSession) -> np.dtype:
 # Eval / latency
 # ---------------------------------------------------------------------------
 
-def evaluate_psnr_onnx(
+def evaluate_metrics_onnx(
     session: ort.InferenceSession,
     val_loader: DataLoader,
-) -> float:
-    """Mean per-image PSNR (dB) over the val loader using the ORT session."""
+) -> tuple[float, float]:
+    """Mean per-image (PSNR dB, SSIM) over the val loader via the ORT session.
+
+    Both metrics are computed on the same tensor pair so the deploy-side
+    numbers stay apples-to-apples with the train / fake-quant pipelines.
+    """
     in_name = session.get_inputs()[0].name
     out_name = session.get_outputs()[0].name
     in_dtype = session_input_dtype(session)
 
-    psnr_sum, count = 0.0, 0
+    psnr_sum, ssim_sum, count = 0.0, 0.0, 0
     for lr, hr in val_loader:
         lr_np = lr.numpy().astype(in_dtype)
         sr_np = session.run([out_name], {in_name: lr_np})[0]
@@ -164,8 +165,22 @@ def evaluate_psnr_onnx(
         mse = ((sr - hr) ** 2).mean(dim=(1, 2, 3))
         psnr = 10.0 * torch.log10(1.0 / mse.clamp(min=1e-10))
         psnr_sum += psnr.sum().item()
+
+        sr_arr = sr.numpy()
+        hr_arr = hr.numpy()
+        for i in range(sr_arr.shape[0]):
+            # Cast to Python float so the running sum stays JSON-serialisable
+            # (skimage SSIM returns numpy scalar types).
+            ssim_sum += float(ssim_fn(
+                hr_arr[i].transpose(1, 2, 0),
+                sr_arr[i].transpose(1, 2, 0),
+                data_range=1.0,
+                channel_axis=2,
+            ))
+
         count += psnr.numel()
-    return psnr_sum / max(count, 1)
+    n = max(count, 1)
+    return psnr_sum / n, ssim_sum / n
 
 
 def benchmark_latency_onnx(
@@ -228,6 +243,11 @@ def write_benchmark_md(
          if r["precision"] == "FP32" and r["psnr_db"] is not None),
         None,
     )
+    fp32_ssim = next(
+        (r["ssim"] for r in rows
+         if r["precision"] == "FP32" and r.get("ssim") is not None),
+        None,
+    )
     fp32_lat_per_provider: dict[str, float] = {
         r["provider"]: r["latency_ms_mean"]
         for r in rows
@@ -258,9 +278,9 @@ def write_benchmark_md(
 
         # Main shootout table
         f.write("## Shootout table\n\n")
-        f.write("| ONNX | Provider | PSNR (dB) | Drop vs FP32 | "
+        f.write("| ONNX | Provider | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
                 "Latency (ms) | Speedup vs FP32 same-provider | Size (MB) |\n")
-        f.write("|---|---|---:|---:|---:|---:|---:|\n")
+        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|\n")
         for r in rows:
             psnr = (
                 f"{r['psnr_db']:.3f}"
@@ -270,6 +290,15 @@ def write_benchmark_md(
                 drop = "n/a"
             else:
                 drop = f"{fp32_psnr - r['psnr_db']:+.3f}"
+
+            ssim_val = (
+                f"{r['ssim']:.4f}"
+                if r.get("ssim") is not None else "n/a"
+            )
+            if r.get("ssim") is None or fp32_ssim is None:
+                ssim_drop = "n/a"
+            else:
+                ssim_drop = f"{fp32_ssim - r['ssim']:+.4f}"
 
             if r["latency_ms_mean"] is not None:
                 lat = f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f}"
@@ -289,7 +318,8 @@ def write_benchmark_md(
             size_mb = f"{r['size_mb']:.2f}" if r["size_mb"] is not None else "n/a"
 
             f.write(f"| `{r['onnx']}` | `{r['provider']}` | "
-                    f"{psnr} | {drop} | {lat} | {speedup} | {size_mb} |\n")
+                    f"{psnr} | {drop} | {ssim_val} | {ssim_drop} | "
+                    f"{lat} | {speedup} | {size_mb} |\n")
         f.write("\n")
 
         # How to read
@@ -299,8 +329,16 @@ def write_benchmark_md(
                 "**Provider-invariant within rounding** -- if it differs much "
                 "between CUDA and CPU for the same ONNX, that's a debug "
                 "signal.\n")
-        f.write("- **Drop vs FP32** uses the FP32 PSNR as baseline. "
-                "Should match (within ~0.1 dB) the fake-quant prediction in "
+        f.write("- **SSIM** is the perceptual cross-check on the same tensor "
+                "pair. PSNR can drop 0.2 dB without visible artefacts; "
+                "SSIM going down by ~0.001 is usually safe, ~0.005+ is the "
+                "point at which side-by-side viewing starts to reveal the "
+                "loss. Disagreement between PSNR and SSIM rankings is a "
+                "signal that the precision is hurting structure (edges) more "
+                "than bulk fidelity, or vice versa.\n")
+        f.write("- **Drop vs FP32** uses the FP32 PSNR / SSIM as baseline. "
+                "Should match (within ~0.1 dB / ~0.001 SSIM) the fake-quant "
+                "prediction in "
                 "`results/quantization/200ep_with_report/report.md`.\n")
         f.write("- **Latency** is forward-pass only. **Provider-specific**: "
                 "INT8 ONNX often runs slower on CUDA EP than FP32 due to "
@@ -433,6 +471,7 @@ def main() -> None:
                 "provider": provider,
                 "size_mb": size_mb,
                 "psnr_db": None,
+                "ssim": None,
                 "latency_ms_mean": None,
                 "latency_ms_std": None,
                 "session_build_ms": sess_build_ms,
@@ -453,12 +492,13 @@ def main() -> None:
                 print(f"(session build: {sess_build_ms:.0f} ms) ", end="", flush=True)
 
             try:
-                psnr = evaluate_psnr_onnx(session, val_loader)
+                psnr, ssim = evaluate_metrics_onnx(session, val_loader)
                 row["psnr_db"] = psnr
+                row["ssim"] = ssim
             except Exception as e:
-                row["error"] = f"PSNR failed: {e!s}"
+                row["error"] = f"metrics failed: {e!s}"
                 rows.append(row)
-                print(f"PSNR FAIL ({e!s})")
+                print(f"metrics FAIL ({e!s})")
                 continue
 
             is_cuda = "CUDA" in row["active_provider"] or "Tensorrt" in row["active_provider"]
@@ -473,11 +513,12 @@ def main() -> None:
             except Exception as e:
                 row["error"] = f"latency failed: {e!s}"
                 rows.append(row)
-                print(f"PSNR={psnr:.3f}, latency FAIL ({e!s})")
+                print(f"PSNR={psnr:.3f}, SSIM={ssim:.4f}, latency FAIL ({e!s})")
                 continue
 
             rows.append(row)
-            print(f"PSNR={psnr:.3f} dB, latency={lat_mean:.2f} +/- {lat_std:.2f} ms "
+            print(f"PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | "
+                  f"latency={lat_mean:.2f} +/- {lat_std:.2f} ms "
                   f"(active_ep={row['active_provider']})")
 
     # Write outputs

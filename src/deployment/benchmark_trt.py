@@ -19,10 +19,7 @@ Precision modes:
 
 Run example::
 
-    python -m src.deployment.benchmark_trt \\
-        --onnx-dir results/onnx_exports/edsr_200ep \\
-        --output-dir results/trt_benchmark/edsr_200ep \\
-        --bench-shape 1x3x96x96
+    python -m src.deployment.benchmark_trt --onnx-dir results/onnx_exports/edsr_200ep --output-dir results/trt_benchmark/edsr_200ep --bench-shape 1x3x96x96
 """
 
 from __future__ import annotations

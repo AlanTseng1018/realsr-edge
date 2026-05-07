@@ -1,0 +1,142 @@
+{
+  "fp32_baseline_psnr": 27.5012,
+  "int8_baseline_psnr": 27.4459,
+  "fp32_baseline_ssim": 0.793228,
+  "int8_baseline_ssim": 0.789305,
+  "sweep": [
+    {
+      "n_fp32_layers": 0,
+      "fp32_layers": [],
+      "psnr": 27.4459,
+      "drop_vs_fp32": 0.0552,
+      "recovered_pct": 0.0,
+      "ssim": 0.789305,
+      "ssim_drop_vs_fp32": 0.003923,
+      "ssim_recovered_pct": 0.0
+    },
+    {
+      "n_fp32_layers": 1,
+      "fp32_layers": [
+        "tail"
+      ],
+      "psnr": 27.4679,
+      "drop_vs_fp32": 0.0333,
+      "recovered_pct": 39.7,
+      "ssim": 0.791136,
+      "ssim_drop_vs_fp32": 0.002093,
+      "ssim_recovered_pct": 46.7
+    },
+    {
+      "n_fp32_layers": 2,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0"
+      ],
+      "psnr": 27.4846,
+      "drop_vs_fp32": 0.0166,
+      "recovered_pct": 69.9,
+      "ssim": 0.792352,
+      "ssim_drop_vs_fp32": 0.000876,
+      "ssim_recovered_pct": 77.7
+    },
+    {
+      "n_fp32_layers": 3,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head"
+      ],
+      "psnr": 27.4845,
+      "drop_vs_fp32": 0.0167,
+      "recovered_pct": 69.8,
+      "ssim": 0.792101,
+      "ssim_drop_vs_fp32": 0.001127,
+      "ssim_recovered_pct": 71.3
+    },
+    {
+      "n_fp32_layers": 4,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16"
+      ],
+      "psnr": 27.4925,
+      "drop_vs_fp32": 0.0087,
+      "recovered_pct": 84.2,
+      "ssim": 0.792673,
+      "ssim_drop_vs_fp32": 0.000555,
+      "ssim_recovered_pct": 85.8
+    },
+    {
+      "n_fp32_layers": 5,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2"
+      ],
+      "psnr": 27.4935,
+      "drop_vs_fp32": 0.0077,
+      "recovered_pct": 86.0,
+      "ssim": 0.792737,
+      "ssim_drop_vs_fp32": 0.000491,
+      "ssim_recovered_pct": 87.5
+    },
+    {
+      "n_fp32_layers": 6,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2"
+      ],
+      "psnr": 27.4942,
+      "drop_vs_fp32": 0.007,
+      "recovered_pct": 87.3,
+      "ssim": 0.792786,
+      "ssim_drop_vs_fp32": 0.000442,
+      "ssim_recovered_pct": 88.7
+    },
+    {
+      "n_fp32_layers": 7,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2",
+        "body.14.conv2"
+      ],
+      "psnr": 27.4948,
+      "drop_vs_fp32": 0.0064,
+      "recovered_pct": 88.4,
+      "ssim": 0.792834,
+      "ssim_drop_vs_fp32": 0.000394,
+      "ssim_recovered_pct": 90.0
+    },
+    {
+      "n_fp32_layers": 8,
+      "fp32_layers": [
+        "tail",
+        "upsampler.0",
+        "head",
+        "body.16",
+        "body.15.conv2",
+        "body.13.conv2",
+        "body.14.conv2",
+        "body.12.conv2"
+      ],
+      "psnr": 27.4955,
+      "drop_vs_fp32": 0.0057,
+      "recovered_pct": 89.7,
+      "ssim": 0.792864,
+      "ssim_drop_vs_fp32": 0.000364,
+      "ssim_recovered_pct": 90.7
+    }
+  ]
+}

@@ -17,22 +17,14 @@ Run examples
 ::
 
     # Export FP32 ONNX from the smoke-trained checkpoint, verify, exit
-    python -m src.deployment.export_onnx \
-        --checkpoint results/checkpoints/edsr_baseline/final.pt \
-        --output results/onnx_models/edsr_fp32.onnx
+    python -m src.deployment.export_onnx --checkpoint results/checkpoints/edsr_baseline/final.pt --output results/onnx_models/edsr_fp32.onnx
 
     # As above but skip the verification step (faster, NOT recommended)
-    python -m src.deployment.export_onnx \
-        --checkpoint results/checkpoints/edsr_baseline/final.pt \
-        --output results/onnx_models/edsr_fp32.onnx \
-        --skip-verify
+    python -m src.deployment.export_onnx --checkpoint results/checkpoints/edsr_baseline/final.pt --output results/onnx_models/edsr_fp32.onnx --skip-verify
 
     # Export with fixed dummy shape (1x3x96x96) but allow dynamic H/W at runtime
     # via --dynamic-axes (default: enabled)
-    python -m src.deployment.export_onnx \
-        --checkpoint results/checkpoints/edsr_baseline/final.pt \
-        --output results/onnx_models/edsr_fp32.onnx \
-        --dummy-h 96 --dummy-w 96
+    python -m src.deployment.export_onnx --checkpoint results/checkpoints/edsr_baseline/final.pt --output results/onnx_models/edsr_fp32.onnx --dummy-h 96 --dummy-w 96
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 Two analyses run from one checkpoint, against the val set:
 
-1. **Format shootout** (:func:`run_shootout`): compare PSNR + latency across
+1. **Format shootout** (:func:`run_shootout`): compare PSNR + SSIM across
    FP32 (baseline), FP16 (autocast), BF16 (autocast), and INT8 (fake-quant
    per :mod:`src.quantization.fake_quant`). Output: markdown table + CSV.
 
@@ -18,16 +18,10 @@ Run examples
 ::
 
     # Both analyses on the existing checkpoint, default device
-    python -m src.quantization.analyze \
-        --checkpoint results/checkpoints/edsr_baseline/final.pt \
-        --output-dir results/quantization
+    python -m src.quantization.analyze --checkpoint results/checkpoints/edsr_baseline/final.pt --output-dir results/quantization
 
     # Only the shootout, smaller calibration set
-    python -m src.quantization.analyze \
-        --checkpoint results/checkpoints/edsr_baseline/final.pt \
-        --output-dir results/quantization \
-        --skip-sensitivity \
-        --calib-batches 4
+    python -m src.quantization.analyze --checkpoint results/checkpoints/edsr_baseline/final.pt --output-dir results/quantization --skip-sensitivity --calib-batches 4
 """
 
 from __future__ import annotations
@@ -42,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
+from skimage.metrics import structural_similarity as ssim_fn
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -60,27 +55,72 @@ from src.quantization.fake_quant import (
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
+def evaluate_metrics(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    forward: Callable[[nn.Module, torch.Tensor], torch.Tensor] | None = None,
+    lpips_model: nn.Module | None = None,
+) -> tuple[float, float, float]:
+    """Mean (PSNR dB, SSIM, LPIPS) over the loader. ``forward`` lets callers
+    wrap the model call (e.g. with ``torch.amp.autocast``).
+
+    SSIM is computed per-image with skimage on RGB float [0, 1] data so it
+    matches what the training script reports -- enabling apples-to-apples
+    comparisons across train / quant / deploy pipelines.
+
+    LPIPS is computed only when ``lpips_model`` is provided; otherwise the
+    third return is ``float('nan')``. LPIPS expects inputs in [-1, 1] range,
+    so we rescale [0, 1] tensors before passing.
+    """
+    if forward is None:
+        forward = lambda m, x: m(x)
+    model.eval()
+    psnr_sum, ssim_sum, lpips_sum, count = 0.0, 0.0, 0.0, 0
+    for lr, hr in loader:
+        lr = lr.to(device, non_blocking=True)
+        hr = hr.to(device, non_blocking=True)
+        sr = forward(model, lr).clamp(0.0, 1.0).float()
+
+        mse = ((sr - hr) ** 2).mean(dim=(1, 2, 3))
+        psnr = 10.0 * torch.log10(1.0 / mse.clamp(min=1e-10))
+        psnr_sum += psnr.sum().item()
+
+        sr_np = sr.cpu().numpy()
+        hr_np = hr.cpu().numpy()
+        for i in range(sr_np.shape[0]):
+            # Cast to Python float so the running sum stays JSON-serialisable
+            # downstream (skimage SSIM returns numpy scalar types).
+            ssim_sum += float(ssim_fn(
+                hr_np[i].transpose(1, 2, 0),
+                sr_np[i].transpose(1, 2, 0),
+                data_range=1.0,
+                channel_axis=2,
+            ))
+
+        if lpips_model is not None:
+            d = lpips_model(sr * 2.0 - 1.0, hr * 2.0 - 1.0)
+            lpips_sum += d.flatten().sum().item()
+
+        count += psnr.numel()
+    n = max(count, 1)
+    return (
+        psnr_sum / n,
+        ssim_sum / n,
+        (lpips_sum / n) if lpips_model is not None else float("nan"),
+    )
+
+
+@torch.no_grad()
 def evaluate_psnr(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
     forward: Callable[[nn.Module, torch.Tensor], torch.Tensor] | None = None,
 ) -> float:
-    """Mean PSNR (dB) over the loader. ``forward`` lets callers wrap the model
-    call (e.g. with ``torch.amp.autocast``)."""
-    if forward is None:
-        forward = lambda m, x: m(x)
-    model.eval()
-    psnr_sum, count = 0.0, 0
-    for lr, hr in loader:
-        lr = lr.to(device, non_blocking=True)
-        hr = hr.to(device, non_blocking=True)
-        sr = forward(model, lr).clamp(0.0, 1.0).float()
-        mse = ((sr - hr) ** 2).mean(dim=(1, 2, 3))
-        psnr = 10.0 * torch.log10(1.0 / mse.clamp(min=1e-10))
-        psnr_sum += psnr.sum().item()
-        count += psnr.numel()
-    return psnr_sum / max(count, 1)
+    """Backwards-compat shim. Prefer :func:`evaluate_metrics` for new code."""
+    psnr, _, _ = evaluate_metrics(model, loader, device, forward=forward)
+    return psnr
 
 
 @torch.no_grad()
@@ -167,63 +207,83 @@ def run_shootout(
     quant_model: nn.Module,
     val_loader: DataLoader,
     device: torch.device,
-    bench_input_shape: tuple[int, int, int, int],
+    lpips_model: nn.Module | None = None,
 ) -> list[dict]:
-    """Compare FP32, FP16, BF16, INT8 (fake-quant). Returns list of result rows."""
+    """Compare FP32, FP16, BF16, INT8 (fake-quant) on **accuracy only**.
+
+    Project convention: all pre-ONNX analyses report accuracy only. Latency
+    measured via PyTorch fake-quant + autocast carries simulation overhead
+    that does not exist in real deploy (q-dq insertion, cast ops), so any
+    latency number from this layer would mislead deploy decisions. Real
+    per-precision latency lives in the ONNX backend benchmark
+    (`results/onnx_benchmark/.../deploy_summary.md`) where the numbers come
+    from real backends (TensorRT / ORT CUDA / ORT CPU).
+
+    When ``lpips_model`` is provided, LPIPS perceptual distance vs the GT
+    HR target is computed for each format. PSNR/SSIM are pixel-statistical
+    metrics; LPIPS uses pretrained CNN features and correlates better with
+    human perception, especially for smooth-region artifacts (banding) that
+    PSNR systematically under-rates.
+    """
     fp32_model = fp32_model.to(device).eval()
     quant_model = quant_model.to(device).eval()
-    bench_in_fp32 = torch.randn(*bench_input_shape, device=device)
 
     results: list[dict] = []
 
     # FP32 baseline
     print("  [FP32]")
-    psnr = evaluate_psnr(fp32_model, val_loader, device)
-    lat_mean, lat_std = benchmark_latency(fp32_model, bench_in_fp32)
+    psnr, ssim, lp = evaluate_metrics(fp32_model, val_loader, device,
+                                       lpips_model=lpips_model)
     results.append({
         "format": "FP32",
         "psnr_db": psnr,
         "psnr_drop_db": 0.0,
-        "latency_ms_mean": lat_mean,
-        "latency_ms_std": lat_std,
+        "ssim": ssim,
+        "ssim_drop": 0.0,
+        "lpips": lp,
+        "lpips_rise": 0.0,
         "size_mb": model_size_mb(fp32_model, 4.0),
         "notes": "baseline",
     })
-    fp32_psnr = psnr
-    print(f"    PSNR={psnr:.3f} dB | latency={lat_mean:.2f}+/-{lat_std:.2f} ms")
+    fp32_psnr, fp32_ssim, fp32_lpips = psnr, ssim, lp
+    print(f"    PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | LPIPS={lp:.4f}")
 
     # FP16 autocast
     if device.type == "cuda":
         print("  [FP16 autocast]")
         fwd = _make_autocast_forward(torch.float16, device.type)
-        psnr = evaluate_psnr(fp32_model, val_loader, device, forward=fwd)
-        lat_mean, lat_std = benchmark_latency(fp32_model, bench_in_fp32, forward=fwd)
+        psnr, ssim, lp = evaluate_metrics(fp32_model, val_loader, device,
+                                           forward=fwd, lpips_model=lpips_model)
         results.append({
             "format": "FP16 (autocast)",
             "psnr_db": psnr,
             "psnr_drop_db": fp32_psnr - psnr,
-            "latency_ms_mean": lat_mean,
-            "latency_ms_std": lat_std,
+            "ssim": ssim,
+            "ssim_drop": fp32_ssim - ssim,
+            "lpips": lp,
+            "lpips_rise": (lp - fp32_lpips) if lpips_model is not None else float("nan"),
             "size_mb": model_size_mb(fp32_model, 2.0),
             "notes": "weights FP32, ops cast on the fly",
         })
-        print(f"    PSNR={psnr:.3f} dB | latency={lat_mean:.2f}+/-{lat_std:.2f} ms")
+        print(f"    PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | LPIPS={lp:.4f}")
 
         # BF16 autocast
         print("  [BF16 autocast]")
         fwd = _make_autocast_forward(torch.bfloat16, device.type)
-        psnr = evaluate_psnr(fp32_model, val_loader, device, forward=fwd)
-        lat_mean, lat_std = benchmark_latency(fp32_model, bench_in_fp32, forward=fwd)
+        psnr, ssim, lp = evaluate_metrics(fp32_model, val_loader, device,
+                                           forward=fwd, lpips_model=lpips_model)
         results.append({
             "format": "BF16 (autocast)",
             "psnr_db": psnr,
             "psnr_drop_db": fp32_psnr - psnr,
-            "latency_ms_mean": lat_mean,
-            "latency_ms_std": lat_std,
+            "ssim": ssim,
+            "ssim_drop": fp32_ssim - ssim,
+            "lpips": lp,
+            "lpips_rise": (lp - fp32_lpips) if lpips_model is not None else float("nan"),
             "size_mb": model_size_mb(fp32_model, 2.0),
             "notes": "wider exponent than FP16, less overflow risk",
         })
-        print(f"    PSNR={psnr:.3f} dB | latency={lat_mean:.2f}+/-{lat_std:.2f} ms")
+        print(f"    PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | LPIPS={lp:.4f}")
     else:
         print("  [FP16/BF16] skipped (autocast requires CUDA on this code path)")
 
@@ -232,21 +292,20 @@ def run_shootout(
     quant_wrappers = {n: m for n, m in quant_model.named_modules()
                       if isinstance(m, CalibratingConv2d)}
     set_all_modes(quant_wrappers, "quantize")
-    psnr = evaluate_psnr(quant_model, val_loader, device)
-    # Latency note: fake-quant has a quant-dequant overhead (slower than FP32),
-    # so this number is NOT the deploy latency. The deploy number requires a
-    # real INT8 backend (ONNX RT / TensorRT). We report it for completeness.
-    lat_mean, lat_std = benchmark_latency(quant_model, bench_in_fp32)
+    psnr, ssim, lp = evaluate_metrics(quant_model, val_loader, device,
+                                       lpips_model=lpips_model)
     results.append({
         "format": "INT8 PTQ (fake-quant)",
         "psnr_db": psnr,
         "psnr_drop_db": fp32_psnr - psnr,
-        "latency_ms_mean": lat_mean,
-        "latency_ms_std": lat_std,
+        "ssim": ssim,
+        "ssim_drop": fp32_ssim - ssim,
+        "lpips": lp,
+        "lpips_rise": (lp - fp32_lpips) if lpips_model is not None else float("nan"),
         "size_mb": model_size_mb(fp32_model, 1.0),
-        "notes": "PSNR is real; latency is fake-quant overhead (NOT deploy latency)",
+        "notes": "fake-quant: q-dq inserted in FP32 math (accuracy-only signal)",
     })
-    print(f"    PSNR={psnr:.3f} dB | latency={lat_mean:.2f}+/-{lat_std:.2f} ms (fake-quant overhead, see note)")
+    print(f"    PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | LPIPS={lp:.4f}")
     set_all_modes(quant_wrappers, "fp32")
 
     return results
@@ -261,9 +320,11 @@ def run_sensitivity(
     val_loader: DataLoader,
     device: torch.device,
     fp32_psnr: float,
+    fp32_ssim: float,
 ) -> list[dict]:
-    """Quantize ONE layer at a time, measure the PSNR drop. Wrappers must be
-    pre-calibrated. Returns rows ranked by drop (largest -> most sensitive)."""
+    """Quantize ONE layer at a time, measure the PSNR + SSIM drop. Wrappers
+    must be pre-calibrated. Returns rows ranked by PSNR drop
+    (largest -> most sensitive)."""
     quant_model = quant_model.to(device).eval()
     wrappers = {n: m for n, m in quant_model.named_modules()
                 if isinstance(m, CalibratingConv2d)}
@@ -273,16 +334,21 @@ def run_sensitivity(
     rows: list[dict] = []
     for i, (name, w) in enumerate(wrappers.items()):
         w.set_mode("quantize")
-        psnr = evaluate_psnr(quant_model, val_loader, device)
+        psnr, ssim, _ = evaluate_metrics(quant_model, val_loader, device)
         drop = fp32_psnr - psnr
+        ssim_drop = fp32_ssim - ssim
         rows.append({
             "layer_idx": i,
             "layer_name": name,
             "psnr_when_only_this_layer_q8": psnr,
             "psnr_drop_db": drop,
+            "ssim_when_only_this_layer_q8": ssim,
+            "ssim_drop": ssim_drop,
         })
         w.set_mode("fp32")  # reset before next
-        print(f"    [{i+1:2d}/{len(wrappers)}] {name:35s}  PSNR {psnr:.3f}  drop {drop:+.3f} dB")
+        print(f"    [{i+1:2d}/{len(wrappers)}] {name:35s}  "
+              f"PSNR {psnr:.3f} (drop {drop:+.3f}) | "
+              f"SSIM {ssim:.4f} (drop {ssim_drop:+.4f})")
 
     rows.sort(key=lambda r: r["psnr_drop_db"], reverse=True)
     return rows
@@ -304,17 +370,59 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def write_shootout_md(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    has_lpips = bool(rows) and "lpips" in rows[0] and not (
+        isinstance(rows[0]["lpips"], float) and math.isnan(rows[0]["lpips"])
+    )
     with path.open("w", encoding="utf-8") as f:
-        f.write("# Quantization Shootout\n\n")
-        f.write("| Format | PSNR (dB) | drop vs FP32 | Latency (ms) | Size (MB) | Notes |\n")
-        f.write("|---|---:|---:|---:|---:|---|\n")
-        for r in rows:
+        f.write("# Quantization Shootout (accuracy only)\n\n")
+        f.write(
+            "Accuracy comparison across FP32 / FP16 / BF16 / INT8 (fake-quant) "
+            "on the val set. **Latency is intentionally NOT reported here** -- "
+            "this is a pre-ONNX analysis using PyTorch fake-quant + autocast, "
+            "both of which add simulation overhead that does not exist in real "
+            "deploy. The project convention is: pre-ONNX analyses report "
+            "accuracy only; real per-precision latency lives in the ONNX "
+            "backend benchmark (`results/onnx_benchmark/.../deploy_summary.md`).\n\n"
+        )
+        if has_lpips:
             f.write(
-                f"| {r['format']} | {r['psnr_db']:.3f} | "
-                f"{r['psnr_drop_db']:+.3f} | "
-                f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f} | "
-                f"{r['size_mb']:.2f} | {r['notes']} |\n"
+                "**Three-metric stack**: PSNR (pixel MSE), SSIM (local "
+                "statistics), LPIPS (CNN feature distance, perceptual). PSNR "
+                "is the SR-literature headline but under-rates banding / "
+                "smooth-region artifacts because their per-pixel error is "
+                "small. LPIPS rises when the perceptual gap widens even if "
+                "PSNR barely moves -- watch the relative drop ratios across "
+                "the three metrics, not absolute values.\n\n"
             )
+            f.write(
+                "| Format | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
+                "LPIPS | LPIPS rise | Size (MB) | Notes |\n"
+            )
+            f.write("|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
+            for r in rows:
+                f.write(
+                    f"| {r['format']} | {r['psnr_db']:.3f} | "
+                    f"{r['psnr_drop_db']:+.3f} | "
+                    f"{r['ssim']:.4f} | "
+                    f"{r['ssim_drop']:+.4f} | "
+                    f"{r['lpips']:.4f} | "
+                    f"{r['lpips_rise']:+.4f} | "
+                    f"{r['size_mb']:.2f} | {r['notes']} |\n"
+                )
+        else:
+            f.write(
+                "| Format | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
+                "Size (MB) | Notes |\n"
+            )
+            f.write("|---|---:|---:|---:|---:|---:|---|\n")
+            for r in rows:
+                f.write(
+                    f"| {r['format']} | {r['psnr_db']:.3f} | "
+                    f"{r['psnr_drop_db']:+.3f} | "
+                    f"{r['ssim']:.4f} | "
+                    f"{r['ssim_drop']:+.4f} | "
+                    f"{r['size_mb']:.2f} | {r['notes']} |\n"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -391,17 +499,23 @@ def write_sensitivity_md(path: Path, rows: list[dict]) -> None:
         f.write("# Per-layer Quantization Sensitivity\n\n")
         f.write(
             "Each row: hold every other layer in FP32, fake-quantize ONLY this "
-            "Conv2d to INT8, measure PSNR drop. Larger drop = layer is more "
-            "quantization-sensitive.\n\n"
+            "Conv2d to INT8, measure PSNR + SSIM drop on the val set. Larger "
+            "drop = layer is more quantization-sensitive. PSNR is the primary "
+            "ranking key; SSIM is reported alongside as a perceptual "
+            "cross-check.\n\n"
         )
-        f.write("| Rank | Layer | PSNR (dB) | Drop (dB) | Class |\n")
-        f.write("|---:|---|---:|---:|---|\n")
+        f.write(
+            "| Rank | Layer | PSNR (dB) | PSNR drop | SSIM | SSIM drop | Class |\n"
+        )
+        f.write("|---:|---|---:|---:|---:|---:|---|\n")
         for i, r in enumerate(rows):
             cls = classify_layer(r["layer_name"])
             f.write(
                 f"| {i + 1} | `{r['layer_name']}` | "
                 f"{r['psnr_when_only_this_layer_q8']:.3f} | "
-                f"{r['psnr_drop_db']:+.3f} | {cls} |\n"
+                f"{r['psnr_drop_db']:+.3f} | "
+                f"{r['ssim_when_only_this_layer_q8']:.4f} | "
+                f"{r['ssim_drop']:+.4f} | {cls} |\n"
             )
 
 
@@ -416,8 +530,16 @@ def write_report_md(
     fp32_psnr = next(
         (r["psnr_db"] for r in shootout_rows if r["format"] == "FP32"), None,
     )
+    fp32_ssim = next(
+        (r["ssim"] for r in shootout_rows if r["format"] == "FP32"), None,
+    )
     int8_drop = next(
         (r["psnr_drop_db"] for r in shootout_rows
+         if r["format"].startswith("INT8")),
+        None,
+    )
+    int8_ssim_drop = next(
+        (r["ssim_drop"] for r in shootout_rows
          if r["format"].startswith("INT8")),
         None,
     )
@@ -425,6 +547,8 @@ def write_report_md(
     top_layers = sensitivity_rows[:top_n]
     top_drop_sum = sum(r["psnr_drop_db"] for r in top_layers)
     other_drop_sum = sum(r["psnr_drop_db"] for r in sensitivity_rows[top_n:])
+    top_ssim_drop_sum = sum(r["ssim_drop"] for r in top_layers)
+    other_ssim_drop_sum = sum(r["ssim_drop"] for r in sensitivity_rows[top_n:])
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -467,43 +591,59 @@ def write_report_md(
         f.write("\n")
 
         # ----------------------------- format shootout ---------------------
-        f.write("## Format shootout\n\n")
+        f.write("## Format shootout (accuracy only)\n\n")
         f.write(
-            "PSNR + forward-pass latency for each format on the val set. "
-            "**Caveat**: the INT8 latency is fake-quant overhead (q-dq inserted "
-            "in PyTorch float math), not real INT8 deploy latency. Real "
-            "deploy-side latency requires ONNX Runtime / TensorRT / vendor "
-            "NPU SDK.\n\n"
+            "PSNR + SSIM for each format on the val set. **Latency is "
+            "intentionally not measured at this stage** -- project convention "
+            "is that pre-ONNX analyses report accuracy only. PyTorch "
+            "fake-quant and autocast both insert simulation ops that don't "
+            "exist in real deploy, so reporting them next to accuracy invites "
+            "wrong conclusions (e.g. \"INT8 is slower than FP32\" -- true in "
+            "fake-quant simulation, false on real INT8 backends). Real "
+            "per-precision latency lives in the ONNX deploy benchmark.\n\n"
+            "PSNR is the headline number (matches SR literature) but is known "
+            "to under-rate perceptual artefacts. SSIM cross-checks structural "
+            "fidelity; large PSNR drop with small SSIM drop usually means the "
+            "loss is mostly in flat regions, while the reverse implies edge / "
+            "structure damage.\n\n"
         )
         f.write(
-            "| Format | PSNR (dB) | Drop vs FP32 | Latency (ms) | "
+            "| Format | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
             "Size (MB) | Notes |\n"
         )
-        f.write("|---|---:|---:|---:|---:|---|\n")
+        f.write("|---|---:|---:|---:|---:|---:|---|\n")
         for r in shootout_rows:
             f.write(
                 f"| {r['format']} | {r['psnr_db']:.3f} | "
                 f"{r['psnr_drop_db']:+.3f} | "
-                f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f} | "
+                f"{r['ssim']:.4f} | "
+                f"{r['ssim_drop']:+.4f} | "
                 f"{r['size_mb']:.2f} | {r['notes']} |\n"
             )
         f.write("\n")
 
         # ----------------------------- per-layer sensitivity ---------------
-        f.write("## Per-layer sensitivity (INT8, sorted by drop)\n\n")
+        f.write("## Per-layer sensitivity (INT8, sorted by PSNR drop)\n\n")
         f.write(
             "Each row: hold every other layer in FP32, fake-quantize ONLY this "
-            "Conv2d to INT8, measure PSNR drop. Larger drop = more "
-            "quantization-sensitive.\n\n"
+            "Conv2d to INT8, measure PSNR + SSIM drop. Larger drop = more "
+            "quantization-sensitive. Ranking is by PSNR drop; SSIM is a "
+            "perceptual cross-check (a layer with big PSNR drop but tiny SSIM "
+            "drop is dropping pixel fidelity in low-structure regions and may "
+            "not need extra precision).\n\n"
         )
-        f.write("| Rank | Layer | PSNR (dB) | Drop (dB) | Class |\n")
-        f.write("|---:|---|---:|---:|---|\n")
+        f.write(
+            "| Rank | Layer | PSNR (dB) | PSNR drop | SSIM | SSIM drop | Class |\n"
+        )
+        f.write("|---:|---|---:|---:|---:|---:|---|\n")
         for i, r in enumerate(sensitivity_rows):
             cls = classify_layer(r["layer_name"])
             f.write(
                 f"| {i + 1} | `{r['layer_name']}` | "
                 f"{r['psnr_when_only_this_layer_q8']:.3f} | "
-                f"{r['psnr_drop_db']:+.3f} | {cls} |\n"
+                f"{r['psnr_drop_db']:+.3f} | "
+                f"{r['ssim_when_only_this_layer_q8']:.4f} | "
+                f"{r['ssim_drop']:+.4f} | {cls} |\n"
             )
         f.write("\n")
 
@@ -516,18 +656,30 @@ def write_report_md(
                 100.0 * top_drop_sum / int8_drop
                 if int8_drop > 1e-9 else float("nan")
             )
-            f.write(
-                f"- Pure-INT8 (all 36 Conv2d) PSNR drop vs FP32: "
-                f"**{int8_drop:+.3f} dB**\n"
+            top_pct_ssim = (
+                100.0 * top_ssim_drop_sum / int8_ssim_drop
+                if int8_ssim_drop and int8_ssim_drop > 1e-9 else float("nan")
             )
             f.write(
-                f"- Top-{top_n} most sensitive layers contribute **{top_pct:.0f}%** "
-                f"of the total drop:\n"
+                f"- Pure-INT8 (all 36 Conv2d) drop vs FP32: "
+                f"**PSNR {int8_drop:+.3f} dB**"
             )
+            if int8_ssim_drop is not None:
+                f.write(f" / **SSIM {int8_ssim_drop:+.4f}**")
+            f.write("\n")
+            f.write(
+                f"- Top-{top_n} most sensitive layers (by PSNR drop) contribute "
+                f"**{top_pct:.0f}%** of the PSNR drop"
+            )
+            if not math.isnan(top_pct_ssim):
+                f.write(f" and **{top_pct_ssim:.0f}%** of the SSIM drop")
+            f.write(":\n")
             for r in top_layers:
                 f.write(
-                    f"  - `{r['layer_name']}` ({classify_layer(r['layer_name'])}): "
-                    f"+{r['psnr_drop_db']:.3f} dB\n"
+                    f"  - `{r['layer_name']}` "
+                    f"({classify_layer(r['layer_name'])}): "
+                    f"PSNR +{r['psnr_drop_db']:.3f} dB, "
+                    f"SSIM +{r['ssim_drop']:.4f}\n"
                 )
             f.write("\n")
             f.write(
@@ -535,9 +687,11 @@ def write_report_md(
                 f"{', '.join(r['layer_name'] for r in top_layers)}"
                 f"` in higher precision (FP16 / FP32) and INT8 the remaining "
                 f"{len(sensitivity_rows) - top_n} Conv2d. Estimated combined "
-                f"drop with this mixed scheme: **~{other_drop_sum:+.3f} dB** "
+                f"drop with this mixed scheme: "
+                f"**~PSNR {other_drop_sum:+.3f} dB / "
+                f"~SSIM {other_ssim_drop_sum:+.4f}** "
                 f"(assuming layer drops are approximately additive; the data "
-                f"above supports this -- sum of all single-layer drops is "
+                f"above supports this -- sum of all single-layer PSNR drops is "
                 f"{top_drop_sum + other_drop_sum:.3f} dB vs measured pure-INT8 "
                 f"drop {int8_drop:.3f} dB).\n\n"
             )
@@ -547,7 +701,8 @@ def write_report_md(
                 "convs are quantization-critical; ResBlock interior is robust. "
                 "Once a real INT8 backend (ONNX RT QInt8, TensorRT) is in "
                 "place, this recipe should be re-validated on actual deploy "
-                "latency.\n"
+                "latency, with both PSNR and SSIM checked against the same "
+                "thresholds.\n"
             )
 
 
@@ -570,9 +725,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--calib-batches", type=int, default=8,
                    help="number of LR batches used for INT8 calibration")
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--bench-batch", type=int, default=1, help="batch size for latency benchmark")
     p.add_argument("--skip-shootout", action="store_true")
     p.add_argument("--skip-sensitivity", action="store_true")
+    p.add_argument("--skip-lpips", action="store_true",
+                   help="Skip LPIPS perceptual metric in shootout (default: include)")
+    p.add_argument("--lpips-net", type=str, default="squeeze",
+                   choices=["alex", "vgg", "squeeze"],
+                   help="LPIPS backbone CNN. squeeze is fastest/smallest "
+                        "(~5MB); alex is the SR-literature default but its "
+                        "torchvision weights download has been flaky on some "
+                        "networks; vgg is most accurate but slowest.")
     return p.parse_args()
 
 
@@ -633,34 +795,57 @@ def main() -> None:
                    n_batches=args.calib_batches)
     print()
 
+    # --- LPIPS model (optional) ---
+    lpips_model: nn.Module | None = None
+    if not args.skip_lpips and not args.skip_shootout:
+        try:
+            import lpips as lpips_pkg
+            print(f"Loading LPIPS model (net={args.lpips_net}) ...")
+            lpips_model = lpips_pkg.LPIPS(net=args.lpips_net, verbose=False).to(device).eval()
+            for p_ in lpips_model.parameters():
+                p_.requires_grad_(False)
+        except Exception as e:
+            print(f"  LPIPS unavailable ({e}); shootout will skip LPIPS column")
+            lpips_model = None
+
     # --- Shootout ---
-    fp32_psnr_for_sensitivity = None
+    fp32_psnr_for_sensitivity: float | None = None
+    fp32_ssim_for_sensitivity: float | None = None
     if not args.skip_shootout:
         print("Running format shootout ...")
-        bench_shape = (args.bench_batch, 3, args.patch_size, args.patch_size)
-        results = run_shootout(fp32_model, quant_model, val_loader, device, bench_shape)
+        results = run_shootout(fp32_model, quant_model, val_loader, device,
+                               lpips_model=lpips_model)
         write_shootout_md(output_dir / "shootout.md", results)
         write_csv(output_dir / "shootout.csv", results)
         print(f"  wrote {output_dir / 'shootout.md'} and shootout.csv")
-        fp32_psnr_for_sensitivity = next(r["psnr_db"] for r in results if r["format"] == "FP32")
+        fp32_row = next(r for r in results if r["format"] == "FP32")
+        fp32_psnr_for_sensitivity = fp32_row["psnr_db"]
+        fp32_ssim_for_sensitivity = fp32_row["ssim"]
         print()
 
     # --- Sensitivity ---
     sensitivity_rows: list[dict] = []
     if not args.skip_sensitivity:
         print("Running per-layer sensitivity sweep ...")
-        if fp32_psnr_for_sensitivity is None:
-            fp32_psnr_for_sensitivity = evaluate_psnr(fp32_model, val_loader, device)
-            print(f"  FP32 baseline PSNR (recomputed): {fp32_psnr_for_sensitivity:.3f} dB")
+        if fp32_psnr_for_sensitivity is None or fp32_ssim_for_sensitivity is None:
+            fp32_psnr_for_sensitivity, fp32_ssim_for_sensitivity, _ = (
+                evaluate_metrics(fp32_model, val_loader, device)
+            )
+            print(f"  FP32 baseline (recomputed): "
+                  f"PSNR {fp32_psnr_for_sensitivity:.3f} dB | "
+                  f"SSIM {fp32_ssim_for_sensitivity:.4f}")
         sensitivity_rows = run_sensitivity(
-            quant_model, val_loader, device, fp32_psnr_for_sensitivity,
+            quant_model, val_loader, device,
+            fp32_psnr_for_sensitivity, fp32_ssim_for_sensitivity,
         )
         write_csv(output_dir / "sensitivity.csv", sensitivity_rows)
         write_sensitivity_md(output_dir / "sensitivity.md", sensitivity_rows)
         print()
-        print("Top-5 most quantization-sensitive layers:")
+        print("Top-5 most quantization-sensitive layers (by PSNR drop):")
         for r in sensitivity_rows[:5]:
-            print(f"  {r['layer_name']:35s}  drop {r['psnr_drop_db']:+.3f} dB")
+            print(f"  {r['layer_name']:35s}  "
+                  f"PSNR {r['psnr_drop_db']:+.3f} dB | "
+                  f"SSIM {r['ssim_drop']:+.4f}")
         print(f"  wrote {output_dir / 'sensitivity.csv'}")
         print(f"  wrote {output_dir / 'sensitivity.md'}")
 

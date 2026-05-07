@@ -9,11 +9,7 @@ Reads benchmark and profiling outputs and writes one large PNG with
 
 Run example::
 
-    python -m src.deployment.visualize_results \\
-        --ort-benchmark  results/onnx_benchmark/edsr_200ep_trt_v2 \\
-        --trt-benchmark  results/trt_benchmark/edsr_200ep_v2 \\
-        --trt-profile    results/trt_profile/edsr_200ep \\
-        --output-dir     results/deploy_report/edsr_200ep
+    python -m src.deployment.visualize_results --ort-benchmark  results/onnx_benchmark/edsr_200ep_trt_v2 --trt-benchmark  results/trt_benchmark/edsr_200ep_v2 --trt-profile    results/trt_profile/edsr_200ep --output-dir     results/deploy_report/edsr_200ep
 """
 
 from __future__ import annotations
@@ -301,12 +297,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     trt_rows    = load_csv(Path(args.trt_benchmark) / "benchmark.csv")
-    ort_rows    = load_csv(Path(args.ort_benchmark) / "benchmark.csv") \
-                  if args.ort_benchmark else []
-    profile_meta= load_json(Path(args.trt_profile) / "metadata.json") \
-                  if args.trt_profile else {}
-    kernel_data = load_kernel_breakdown(Path(args.trt_profile)) \
-                  if args.trt_profile else {}
+    ort_rows    = load_csv(Path(args.ort_benchmark) / "benchmark.csv") if args.ort_benchmark else []
+    profile_meta= load_json(Path(args.trt_profile) / "metadata.json") if args.trt_profile else {}
+    kernel_data = load_kernel_breakdown(Path(args.trt_profile)) if args.trt_profile else {}
 
     trt_meta = load_json(Path(args.trt_benchmark) / "metadata.json")
     hardware    = trt_meta.get("device_name", "GPU")

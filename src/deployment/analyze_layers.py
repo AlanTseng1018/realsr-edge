@@ -24,10 +24,7 @@ Outputs
 
 Run::
 
-    python -m src.deployment.analyze_layers \\
-        --checkpoint results/runs/.../checkpoints/best.pt \\
-        --output-dir results/layer_analysis/edsr_200ep \\
-        --data-root  data/DIV2K --val-dir DIV2K_valid_HR
+    python -m src.deployment.analyze_layers --checkpoint results/runs/.../checkpoints/best.pt --output-dir results/layer_analysis/edsr_200ep --data-root  data/DIV2K --val-dir DIV2K_valid_HR
 """
 
 from __future__ import annotations
@@ -67,12 +64,9 @@ def load_model(checkpoint: Path, device: torch.device) -> EDSR:
     train_args = ckpt.get("args", {})
 
     # Infer arch from checkpoint or args
-    n_feats     = (train_args.get("n_feats") if isinstance(train_args, dict) else None) \
-                  or state["head.weight"].shape[0]
-    n_resblocks = (train_args.get("n_resblocks") if isinstance(train_args, dict) else None) \
-                  or 16
-    scale       = (train_args.get("scale") if isinstance(train_args, dict) else None) \
-                  or 2
+    n_feats     = (train_args.get("n_feats") if isinstance(train_args, dict) else None) or state["head.weight"].shape[0]
+    n_resblocks = (train_args.get("n_resblocks") if isinstance(train_args, dict) else None) or 16
+    scale       = (train_args.get("scale") if isinstance(train_args, dict) else None) or 2
 
     model = EDSR(scale_factor=scale, n_resblocks=n_resblocks, n_feats=n_feats)
     model.load_state_dict(state, strict=True)
@@ -358,9 +352,7 @@ def write_md_report(
         f.write("|---|---|---|---:|---:|---:|---:|---:|\n")
         for i, r in enumerate(rows, 1):
             shape_str = "×".join(str(d) for d in r["shape"])
-            psnr_str  = f"**{r['isolated_psnr']:.1f}**" \
-                        if r["isolated_psnr"] < 60 \
-                        else f"{r['isolated_psnr']:.1f}"
+            psnr_str  = f"**{r['isolated_psnr']:.1f}**" if r["isolated_psnr"] < 60 else f"{r['isolated_psnr']:.1f}"
             f.write(
                 f"| {i} | `{r['layer']}` | {shape_str} | "
                 f"{r['w_amax']:.4e} | {r['w_scale_mean']:.4e} | "

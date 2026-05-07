@@ -1,4 +1,4 @@
-"""Train EDSR-baseline on DIV2K, with optional torch.compile.
+"""Train EDSR-baseline on DIV2K, with optional torch.compile and QAT.
 
 Run examples
 ------------
@@ -18,6 +18,18 @@ Resume from a checkpoint::
 
     python -m src.training.train --resume results/runs/<run_id>/checkpoints/best.pt
 
+Train normally, then automatically run QAT fine-tuning afterward::
+
+    python -m src.training.train --compile --qat
+
+QAT only, starting from an existing best.pt (skip the FP32 training phase)::
+
+    python -m src.training.train --epochs 0 --qat --qat-from results/runs/<run_id>/checkpoints/best.pt
+
+QAT with custom hyperparameters (longer fine-tune, different LR)::
+
+    python -m src.training.train --qat --qat-epochs 50 --qat-lr 5e-6
+
 Notes on torch.compile
 ----------------------
 * `mode='default'` is fastest to compile (~10-30 s) and gives ~1.3-1.7x speedup.
@@ -27,10 +39,38 @@ Notes on torch.compile
   If you see ``backend='inductor' raised`` errors, fall back to ``--compile``
   off and report the trace.
 
+Notes on QAT (Quantization-Aware Training)
+------------------------------------------
+* ``--qat`` runs a fine-tuning phase AFTER the normal FP32 training.
+  The baseline ``best.pt`` is loaded, every ``nn.Conv2d`` gets wrapped
+  with a fake-quant observer (``CalibratingConv2d``), activation scales
+  are calibrated on a few val batches, then training continues in
+  ``mode='qat'`` (fake-quant + Straight-Through Estimator gradients).
+  Output goes to a separate ``<run>_qat/best.pt`` directory next to the
+  FP32 run, so the FP32 baseline is preserved.
+* ``--qat-from`` points at any existing checkpoint instead of using the
+  just-trained one. Combined with ``--epochs 0`` this lets you re-run
+  QAT against an old baseline without retraining from scratch.
+* Default ``--qat-epochs 20 --qat-lr 1e-5`` (10x smaller than the base
+  LR) is conservative on purpose: the model is already converged, you
+  only want it to adjust to the quantization noise. Going larger
+  (50 epochs, 5e-5 LR) rarely helps and risks regressing.
+* ``--qat-calib-batches 20`` calibrates activation max-abs from ~20
+  batches before QAT begins. The result is then exported via the same
+  ``export_pipeline.py`` path as PTQ INT8; the difference is the
+  weights have been "quantization-aware" trained, typically recovering
+  most of the PTQ PSNR drop.
+* When to use QAT: rough heuristic — PTQ drop < 0.2 dB usually doesn't
+  need QAT. Caveat and full reasoning in
+  ``learning/when_to_use_qat.md``.
+
 Notes on memory (RTX 3060 6GB)
 ------------------------------
 * Default batch=16, patch=96 (LR) / 192 (HR), n_feats=64 fits in ~3-4 GB.
 * If OOM: drop batch to 8 or patch to 64.
+* QAT adds modest memory overhead from the fake-quant wrappers (extra
+  buffers per layer for calibration stats + the STE backward graph);
+  same OOM mitigations apply.
 * AMP / mixed precision is intentionally NOT enabled in V1 — keeps the
   training loop minimal. Add later via ``torch.amp.autocast`` + ``GradScaler``.
 """

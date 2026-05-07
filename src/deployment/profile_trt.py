@@ -17,12 +17,7 @@ because the profiler shows X".
 
 Run example::
 
-    python -m src.deployment.profile_trt \\
-        --onnx-dir  results/onnx_exports/edsr_200ep \\
-        --engine-dir results/trt_benchmark/edsr_200ep/engines \\
-        --checkpoint results/runs/20260427_143542_ep200_b16_scale2_realistic/checkpoints/best.pt \\
-        --output-dir results/trt_profile/edsr_200ep \\
-        --bench-shape 1x3x96x96
+    python -m src.deployment.profile_trt --onnx-dir  results/onnx_exports/edsr_200ep --engine-dir results/trt_benchmark/edsr_200ep/engines --checkpoint results/runs/20260427_143542_ep200_b16_scale2_realistic/checkpoints/best.pt --output-dir results/trt_profile/edsr_200ep --bench-shape 1x3x96x96
 """
 
 from __future__ import annotations
@@ -49,18 +44,43 @@ from src.deployment.benchmark_trt import TRTContext, build_engine, TRT_LOGGER
 
 
 # ---------------------------------------------------------------------------
-# RTX 3090 hardware specs for roofline
+# GPU specs for roofline (auto-pick by torch.cuda device name)
 # ---------------------------------------------------------------------------
 
-GPU_SPECS = {
-    "name": "NVIDIA GeForce RTX 3090",
-    # Peak FLOPS (TFLOPS) — from NVIDIA product page
-    "peak_fp32_tflops":  35.58,
-    "peak_fp16_tflops": 142.3,   # FP16 Tensor Core
-    "peak_int8_tops":   284.6,   # INT8 Tensor Core (TOPS, same unit scale)
-    # Memory bandwidth GB/s
-    "mem_bw_gbs": 936.2,
+# Peak compute / memory bandwidth per GPU. Numbers are approximate (vary by
+# power profile / clock) but sufficient for relative roofline interpretation.
+KNOWN_GPU_SPECS: dict[str, dict] = {
+    "NVIDIA GeForce RTX 3090": {
+        "peak_fp32_tflops": 35.58,
+        "peak_fp16_tflops": 142.3,
+        "peak_int8_tops": 284.6,
+        "mem_bw_gbs": 936.2,
+    },
+    "NVIDIA GeForce RTX 3060 Laptop GPU": {
+        # Mobile sm86, ~80W TGP variant (varies 60-130W). Tensor Core peaks
+        # are roughly 1/3 of a 3090 due to lower SM count + lower clocks.
+        "peak_fp32_tflops": 10.94,
+        "peak_fp16_tflops": 21.9,
+        "peak_int8_tops": 43.7,
+        "mem_bw_gbs": 336.2,
+    },
 }
+
+
+def detect_gpu_specs() -> dict:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available; profile_trt requires a GPU")
+    name = torch.cuda.get_device_name(0)
+    if name in KNOWN_GPU_SPECS:
+        return {"name": name, **KNOWN_GPU_SPECS[name]}
+    # Unknown GPU: fall back to 3090 numbers and warn. Roofline ceilings
+    # will be wrong in absolute terms but the data points (arithmetic
+    # intensity) remain correct.
+    print(f"[warn] {name} not in KNOWN_GPU_SPECS; using RTX 3090 ceilings as placeholder")
+    return {"name": name, **KNOWN_GPU_SPECS["NVIDIA GeForce RTX 3090"]}
+
+
+GPU_SPECS = detect_gpu_specs()
 
 PRECISION_COLOR = {"FP32": "#4c8cbf", "FP16": "#e8872a", "INT8": "#2ca02c"}
 

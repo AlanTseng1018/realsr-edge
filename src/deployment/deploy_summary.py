@@ -19,9 +19,7 @@ underlying benchmark and re-run this script in seconds.
 
 Run example::
 
-    python -m src.deployment.deploy_summary \\
-        --benchmark-csv results/onnx_benchmark/edsr_200ep_full/benchmark.csv \\
-        --output results/onnx_benchmark/edsr_200ep_full/deploy_summary.md
+    python -m src.deployment.deploy_summary --benchmark-csv results/onnx_benchmark/edsr_200ep_full/benchmark.csv --output results/onnx_benchmark/edsr_200ep_full/deploy_summary.md
 """
 
 from __future__ import annotations
@@ -52,8 +50,11 @@ def load_benchmark_csv(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
-            # Convert numeric fields
-            for k in ("psnr_db", "latency_ms_mean", "latency_ms_std",
+            # Convert numeric fields. ``ssim`` is optional for backwards
+            # compat with old benchmark.csv files that pre-date the SSIM
+            # extension; rows missing it just stay None and the writer
+            # renders "n/a".
+            for k in ("psnr_db", "ssim", "latency_ms_mean", "latency_ms_std",
                       "size_mb", "session_build_ms"):
                 v = r.get(k, "")
                 r[k] = float(v) if v not in ("", None) else None
@@ -189,46 +190,83 @@ def write_md(
         f.write("\n")
 
         # ---------- Accuracy ----------
-        f.write("## 4. Accuracy per precision (PSNR on val set)\n\n")
-        f.write("PSNR is provider-invariant within float-rounding noise; "
-                "we report the mean across providers per precision.\n\n")
-        f.write("| Precision | mean PSNR (dB) | range across providers | drop vs FP32 |\n")
-        f.write("|---|---:|---:|---:|\n")
+        f.write("## 4. Accuracy per precision (PSNR + SSIM on val set)\n\n")
+        f.write("Both metrics are provider-invariant within float-rounding "
+                "noise; we report the mean across providers per precision and "
+                "the spread (max - min) so any unexpected provider divergence "
+                "shows up here. PSNR is the headline number; SSIM is the "
+                "perceptual cross-check.\n\n")
+        f.write("| Precision | mean PSNR (dB) | PSNR spread | PSNR drop vs FP32 | "
+                "mean SSIM | SSIM spread | SSIM drop vs FP32 |\n")
+        f.write("|---|---:|---:|---:|---:|---:|---:|\n")
+
         fp32_psnrs = [r["psnr_db"] for r in rows
                       if precision_of(r["onnx"]) == "FP32"
                       and r.get("psnr_db") is not None]
-        fp32_mean = sum(fp32_psnrs) / len(fp32_psnrs) if fp32_psnrs else None
+        fp32_ssims = [r["ssim"] for r in rows
+                      if precision_of(r["onnx"]) == "FP32"
+                      and r.get("ssim") is not None]
+        fp32_psnr_mean = sum(fp32_psnrs) / len(fp32_psnrs) if fp32_psnrs else None
+        fp32_ssim_mean = sum(fp32_ssims) / len(fp32_ssims) if fp32_ssims else None
+
         for prec in precisions:
             psnrs = [r["psnr_db"] for r in rows
                      if precision_of(r["onnx"]) == prec
                      and r.get("psnr_db") is not None]
+            ssims = [r["ssim"] for r in rows
+                     if precision_of(r["onnx"]) == prec
+                     and r.get("ssim") is not None]
             if not psnrs:
-                f.write(f"| {prec} | n/a | n/a | n/a |\n")
+                f.write(f"| {prec} | n/a | n/a | n/a | n/a | n/a | n/a |\n")
                 continue
-            mean = sum(psnrs) / len(psnrs)
-            spread = max(psnrs) - min(psnrs)
-            drop = (fp32_mean - mean) if fp32_mean is not None else 0.0
-            f.write(f"| **{prec}** | {mean:.3f} | {spread:.3f} | "
-                    f"{drop:+.3f} |\n")
+
+            psnr_mean = sum(psnrs) / len(psnrs)
+            psnr_spread = max(psnrs) - min(psnrs)
+            psnr_drop = ((fp32_psnr_mean - psnr_mean)
+                         if fp32_psnr_mean is not None else 0.0)
+
+            if ssims:
+                ssim_mean = sum(ssims) / len(ssims)
+                ssim_spread = max(ssims) - min(ssims)
+                ssim_drop = ((fp32_ssim_mean - ssim_mean)
+                             if fp32_ssim_mean is not None else 0.0)
+                ssim_mean_s = f"{ssim_mean:.4f}"
+                ssim_spread_s = f"{ssim_spread:.4f}"
+                ssim_drop_s = f"{ssim_drop:+.4f}"
+            else:
+                ssim_mean_s = ssim_spread_s = ssim_drop_s = "n/a"
+
+            f.write(f"| **{prec}** | {psnr_mean:.3f} | {psnr_spread:.3f} | "
+                    f"{psnr_drop:+.3f} | "
+                    f"{ssim_mean_s} | {ssim_spread_s} | {ssim_drop_s} |\n")
         f.write("\n")
+
+        # Keep the legacy variable name for downstream sections
+        fp32_mean = fp32_psnr_mean
 
         # ---------- Per-provider deep dive ----------
         f.write("## 5. Per-provider deep dive\n\n")
         for prov in providers_all:
             f.write(f"### `{prov}`\n\n")
-            f.write("| Precision | PSNR (dB) | Drop vs FP32 | Latency (ms) | "
-                    "Speedup vs FP32 | Build (ms) | Notes |\n")
-            f.write("|---|---:|---:|---:|---:|---:|---|\n")
+            f.write("| Precision | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
+                    "Latency (ms) | Speedup vs FP32 | Build (ms) | Notes |\n")
+            f.write("|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
             base_lat = (by_pp.get(("FP32", prov), {}) or {}).get("latency_ms_mean")
+            base_ssim = (by_pp.get(("FP32", prov), {}) or {}).get("ssim")
             for prec in precisions:
                 r = by_pp.get((prec, prov))
                 if r is None:
-                    f.write(f"| {prec} | n/a | n/a | n/a | n/a | n/a | (no row) |\n")
+                    f.write(f"| {prec} | n/a | n/a | n/a | n/a | "
+                            f"n/a | n/a | n/a | (no row) |\n")
                     continue
                 psnr = (f"{r['psnr_db']:.3f}"
                         if r.get("psnr_db") is not None else "n/a")
                 drop = ("n/a" if r.get("psnr_db") is None or fp32_mean is None
                         else f"{fp32_mean - r['psnr_db']:+.3f}")
+                ssim_v = (f"{r['ssim']:.4f}"
+                          if r.get("ssim") is not None else "n/a")
+                ssim_d = ("n/a" if r.get("ssim") is None or base_ssim is None
+                          else f"{base_ssim - r['ssim']:+.4f}")
                 lat = fmt_latency(r)
                 if (r.get("latency_ms_mean") is None
                         or base_lat is None or base_lat <= 0):
@@ -241,30 +279,33 @@ def write_md(
                 build = (f"{r['session_build_ms']:.0f}"
                          if r.get("session_build_ms") is not None else "n/a")
                 note = r.get("error") or ""
-                f.write(f"| {prec} | {psnr} | {drop} | {lat} | "
-                        f"{sp_str} | {build} | {note[:40]} |\n")
+                f.write(f"| {prec} | {psnr} | {drop} | {ssim_v} | {ssim_d} | "
+                        f"{lat} | {sp_str} | {build} | {note[:40]} |\n")
             f.write("\n")
 
         # ---------- Per-precision deep dive ----------
         f.write("## 6. Per-precision deep dive\n\n")
         for prec in precisions:
             f.write(f"### {prec}\n\n")
-            f.write("| Provider | PSNR (dB) | Latency (ms) | Size (MB) | "
-                    "Active EP | Notes |\n")
-            f.write("|---|---:|---:|---:|---|---|\n")
+            f.write("| Provider | PSNR (dB) | SSIM | Latency (ms) | "
+                    "Size (MB) | Active EP | Notes |\n")
+            f.write("|---|---:|---:|---:|---:|---|---|\n")
             for prov in providers_all:
                 r = by_pp.get((prec, prov))
                 if r is None:
-                    f.write(f"| `{prov}` | n/a | n/a | n/a | n/a | (no row) |\n")
+                    f.write(f"| `{prov}` | n/a | n/a | n/a | n/a | n/a "
+                            f"| (no row) |\n")
                     continue
                 psnr = (f"{r['psnr_db']:.3f}"
                         if r.get("psnr_db") is not None else "n/a")
+                ssim_v = (f"{r['ssim']:.4f}"
+                          if r.get("ssim") is not None else "n/a")
                 lat = fmt_latency(r)
                 size = (f"{r['size_mb']:.2f}"
                         if r.get("size_mb") is not None else "n/a")
                 active = r.get("active_provider", "n/a")
                 note = r.get("error") or ""
-                f.write(f"| `{prov}` | {psnr} | {lat} | {size} | "
+                f.write(f"| `{prov}` | {psnr} | {ssim_v} | {lat} | {size} | "
                         f"`{active}` | {note[:40]} |\n")
             f.write("\n")
 
@@ -363,8 +404,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     bench_csv = Path(args.benchmark_csv)
-    meta_json = Path(args.metadata_json) if args.metadata_json \
-        else bench_csv.parent / "metadata.json"
+    meta_json = Path(args.metadata_json) if args.metadata_json else bench_csv.parent / "metadata.json"
     out_path = Path(args.output)
 
     rows = load_benchmark_csv(bench_csv)

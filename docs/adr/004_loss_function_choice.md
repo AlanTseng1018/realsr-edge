@@ -21,8 +21,7 @@ Accepted
 
 1. **TV scenario alignment**:過度銳化 / 強烈材質會被觀眾感知為「**假**」
 2. **Time budget**:perceptual loss 訓練成本 1-2 天,GAN 5+ 天
-3. **JD priority**:此能力非 JD 加分項
-4. **Trade-off cost**:改善視覺 = 犧牲 PSNR 0.5-3 dB
+3. **Trade-off cost**:改善視覺 = 犧牲 PSNR 0.5-3 dB
 
 ### What we trade away
 

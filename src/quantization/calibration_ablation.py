@@ -19,9 +19,7 @@ Outputs (under ``--output-dir``):
 
 Run::
 
-    python -m src.quantization.calibration_ablation \\
-        --checkpoint results/runs/.../checkpoints/best.pt \\
-        --output-dir results/quantization/calibration_ablation
+    python -m src.quantization.calibration_ablation --checkpoint results/runs/.../checkpoints/best.pt --output-dir results/quantization/calibration_ablation
 """
 
 from __future__ import annotations
@@ -41,9 +39,8 @@ from torch.utils.data import DataLoader
 from src.data.dataset import SRDataset
 from src.models.edsr import EDSR
 from src.quantization.analyze import (
-    benchmark_latency,
     calibrate_int8,
-    evaluate_psnr,
+    evaluate_metrics,
 )
 from src.quantization.fake_quant import (
     CalibratingConv2d,
@@ -157,16 +154,27 @@ def write_ablation_md(
                 f"+ symmetric per-channel INT8 (weights)\n\n")
 
         # Shootout
-        f.write("## Calibration scheme shootout\n\n")
+        f.write("## Calibration scheme shootout (accuracy only)\n\n")
         f.write("All four schemes share the **same calibration pass** -- the histogram "
                 "is collected once, and each scheme just chooses a different summary of "
                 "it (running max for `max-abs`, percentile cutoff for the other three).\n\n")
-        f.write("| Scheme | PSNR (dB) | Drop vs FP32 | Latency (ms) |\n")
-        f.write("|---|---:|---:|---:|\n")
+        f.write("PSNR is the primary ranking metric; SSIM is reported alongside as a "
+                "perceptual cross-check. A calibration scheme that wins PSNR but loses "
+                "SSIM (or vice versa) is a red flag worth investigating before committing "
+                "to deploy.\n\n")
+        f.write("**Latency is intentionally not reported here.** Calibration scheme only "
+                "changes the per-tensor scale value -- it does not change op count, "
+                "kernel selection, or anything that affects runtime. Latency differences "
+                "between schemes would be measurement noise, not a deploy signal. Real "
+                "per-precision latency (where it does differ) lives in the ONNX deploy "
+                "benchmark (`results/onnx_benchmark/.../deploy_summary.md`).\n\n")
+        f.write("| Scheme | PSNR (dB) | PSNR drop | SSIM | SSIM drop |\n")
+        f.write("|---|---:|---:|---:|---:|\n")
         for r in rows:
-            lat = f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f}"
             f.write(f"| {r['scheme']} | {r['psnr_db']:.3f} | "
-                    f"{r['psnr_drop_db']:+.3f} | {lat} |\n")
+                    f"{r['psnr_drop_db']:+.3f} | "
+                    f"{r['ssim']:.4f} | "
+                    f"{r['ssim_drop']:+.4f} |\n")
         f.write("\n")
 
         # Per-layer amax table
@@ -203,10 +211,26 @@ def write_ablation_md(
         # Reading guide for the table
         best_psnr = max(r["psnr_db"] for r in rows)
         best_scheme = next(r["scheme"] for r in rows if r["psnr_db"] == best_psnr)
+        best_ssim = max(r["ssim"] for r in rows)
+        best_ssim_scheme = next(r["scheme"] for r in rows if r["ssim"] == best_ssim)
+        psnr_spread = (max(r['psnr_db'] for r in rows)
+                       - min(r['psnr_db'] for r in rows))
+        ssim_spread = (max(r['ssim'] for r in rows)
+                       - min(r['ssim'] for r in rows))
         f.write("## Takeaway\n\n")
-        f.write(f"On this checkpoint and val set, **`{best_scheme}`** wins the shootout "
-                f"({best_psnr:.3f} dB). The spread across schemes is "
-                f"{(max(r['psnr_db'] for r in rows) - min(r['psnr_db'] for r in rows)):.3f} dB.\n\n")
+        f.write(f"On this checkpoint and val set, **`{best_scheme}`** wins on PSNR "
+                f"({best_psnr:.3f} dB) and **`{best_ssim_scheme}`** wins on SSIM "
+                f"({best_ssim:.4f}). PSNR spread across schemes: {psnr_spread:.3f} dB; "
+                f"SSIM spread: {ssim_spread:.4f}.\n\n")
+        if best_scheme == best_ssim_scheme:
+            f.write("PSNR and SSIM agree on the winner -- safe choice.\n\n")
+        else:
+            f.write(f"**Mismatch**: PSNR prefers `{best_scheme}` but SSIM prefers "
+                    f"`{best_ssim_scheme}`. Inspect the histograms before "
+                    f"committing -- this usually means one scheme preserves bulk "
+                    f"pixel fidelity while the other preserves edge / structure "
+                    f"better. Pick based on the deploy use-case (broadcast quality "
+                    f"-> SSIM-leaning; benchmark scoring -> PSNR-leaning).\n\n")
         f.write("Interpret carefully:\n\n")
         f.write("- A small spread (< 0.05 dB) means activations are NOT outlier-heavy "
                 "for this model -- the calibration choice is mostly cosmetic.\n")
@@ -232,10 +256,12 @@ def plot_histograms(
     amax_per_scheme: dict[str, dict[str, float]],
     output_path: Path,
     psnr_per_scheme: dict[str, float] | None = None,
+    ssim_per_scheme: dict[str, float] | None = None,
 ) -> None:
     """2x3 subplot: activation histogram + amax markers per scheme.
 
-    Y-axis is log to make long tails legible.
+    Y-axis is log to make long tails legible. Per-scheme legend entry shows
+    chosen amax + the resulting PSNR / SSIM (when supplied).
     """
     matplotlib.use("Agg")  # headless
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -274,12 +300,14 @@ def plot_histograms(
             if v is None:
                 continue
             color = SCHEME_COLORS.get(scheme_name, "black")
-            psnr_str = ""
+            metric_str = ""
             if psnr_per_scheme and scheme_name in psnr_per_scheme:
-                psnr_str = f"  PSNR {psnr_per_scheme[scheme_name]:.3f} dB"
+                metric_str += f"  PSNR {psnr_per_scheme[scheme_name]:.3f} dB"
+            if ssim_per_scheme and scheme_name in ssim_per_scheme:
+                metric_str += f" | SSIM {ssim_per_scheme[scheme_name]:.4f}"
             ax.axvline(
                 v, color=color, linestyle="--", linewidth=1.5,
-                label=f"{scheme_name}: {v:.3f}{psnr_str}",
+                label=f"{scheme_name}: {v:.3f}{metric_str}",
             )
 
         ax.set_title(layer_name, fontsize=11)
@@ -398,15 +426,18 @@ def main() -> None:
                    n_batches=args.calib_batches)
     print()
 
-    # --- FP32 baseline PSNR ---
-    print("FP32 baseline PSNR ...")
-    fp32_psnr = evaluate_psnr(fp32_model, val_loader, device)
-    print(f"  FP32 = {fp32_psnr:.3f} dB")
+    # --- FP32 baseline PSNR + SSIM ---
+    print("FP32 baseline ...")
+    fp32_psnr, fp32_ssim, _ = evaluate_metrics(fp32_model, val_loader, device)
+    print(f"  FP32 = PSNR {fp32_psnr:.3f} dB | SSIM {fp32_ssim:.4f}")
     print()
 
     # --- Sweep schemes ---
+    # Accuracy-only shootout. Calibration scheme only changes the per-tensor
+    # scale value -- it does not change op count or kernel selection -- so
+    # any latency spread across the four schemes would be measurement noise.
+    # Real per-precision latency lives in the ONNX deploy benchmark.
     print("Running scheme shootout ...")
-    bench_input = torch.randn(1, 3, args.patch_size, args.patch_size, device=device)
     rows: list[dict] = []
     amax_per_scheme: dict[str, dict[str, float]] = {}
 
@@ -419,8 +450,7 @@ def main() -> None:
         amax_per_scheme[label] = collect_amax_per_layer(wrappers)
 
         set_all_modes(wrappers, "quantize")
-        psnr = evaluate_psnr(quant_model, val_loader, device)
-        lat_mean, lat_std = benchmark_latency(quant_model, bench_input)
+        psnr, ssim, _ = evaluate_metrics(quant_model, val_loader, device)
         set_all_modes(wrappers, "fp32")
 
         rows.append({
@@ -429,12 +459,11 @@ def main() -> None:
             "percentile": "" if percentile is None else f"{percentile:.4f}",
             "psnr_db": psnr,
             "psnr_drop_db": fp32_psnr - psnr,
-            "latency_ms_mean": lat_mean,
-            "latency_ms_std": lat_std,
+            "ssim": ssim,
+            "ssim_drop": fp32_ssim - ssim,
         })
-        print(f"  [{label:18s}] PSNR {psnr:.3f} dB  "
-              f"(drop {fp32_psnr - psnr:+.3f})  "
-              f"latency {lat_mean:.2f} +/- {lat_std:.2f} ms")
+        print(f"  [{label:18s}] PSNR {psnr:.3f} dB (drop {fp32_psnr - psnr:+.3f}) | "
+              f"SSIM {ssim:.4f} (drop {fp32_ssim - ssim:+.4f})")
 
     # --- Restore to default max-abs ---
     apply_calibration_to_all(wrappers, method="max-abs")
@@ -451,10 +480,12 @@ def main() -> None:
 
     # Histogram plot for representative layers
     psnr_per_scheme = {r["scheme"]: r["psnr_db"] for r in rows}
+    ssim_per_scheme = {r["scheme"]: r["ssim"] for r in rows}
     plot_histograms(
         wrappers, REPRESENTATIVE_LAYERS, amax_per_scheme,
         output_dir / "histograms.png",
         psnr_per_scheme=psnr_per_scheme,
+        ssim_per_scheme=ssim_per_scheme,
     )
 
     # Metadata for the report

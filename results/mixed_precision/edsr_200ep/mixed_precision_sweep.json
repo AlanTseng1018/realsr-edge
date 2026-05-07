@@ -1,13 +1,18 @@
 {
-  "fp32_baseline": 27.4386,
-  "int8_baseline": 27.3584,
+  "fp32_baseline_psnr": 27.4386,
+  "int8_baseline_psnr": 27.3584,
+  "fp32_baseline_ssim": 0.790677,
+  "int8_baseline_ssim": 0.786219,
   "sweep": [
     {
       "n_fp32_layers": 0,
       "fp32_layers": [],
       "psnr": 27.3584,
       "drop_vs_fp32": 0.0801,
-      "recovered_pct": 0.0
+      "recovered_pct": 0.0,
+      "ssim": 0.786219,
+      "ssim_drop_vs_fp32": 0.004458,
+      "ssim_recovered_pct": 0.0
     },
     {
       "n_fp32_layers": 1,
@@ -16,7 +21,10 @@
       ],
       "psnr": 27.3873,
       "drop_vs_fp32": 0.0513,
-      "recovered_pct": 36.0
+      "recovered_pct": 36.0,
+      "ssim": 0.788208,
+      "ssim_drop_vs_fp32": 0.002468,
+      "ssim_recovered_pct": 44.6
     },
     {
       "n_fp32_layers": 2,
@@ -26,7 +34,10 @@
       ],
       "psnr": 27.4054,
       "drop_vs_fp32": 0.0332,
-      "recovered_pct": 58.6
+      "recovered_pct": 58.6,
+      "ssim": 0.789472,
+      "ssim_drop_vs_fp32": 0.001205,
+      "ssim_recovered_pct": 73.0
     },
     {
       "n_fp32_layers": 3,
@@ -37,7 +48,10 @@
       ],
       "psnr": 27.4215,
       "drop_vs_fp32": 0.0171,
-      "recovered_pct": 78.6
+      "recovered_pct": 78.6,
+      "ssim": 0.789482,
+      "ssim_drop_vs_fp32": 0.001195,
+      "ssim_recovered_pct": 73.2
     },
     {
       "n_fp32_layers": 4,
@@ -49,7 +63,10 @@
       ],
       "psnr": 27.4284,
       "drop_vs_fp32": 0.0102,
-      "recovered_pct": 87.2
+      "recovered_pct": 87.2,
+      "ssim": 0.790019,
+      "ssim_drop_vs_fp32": 0.000658,
+      "ssim_recovered_pct": 85.2
     },
     {
       "n_fp32_layers": 5,
@@ -62,7 +79,10 @@
       ],
       "psnr": 27.4294,
       "drop_vs_fp32": 0.0092,
-      "recovered_pct": 88.5
+      "recovered_pct": 88.5,
+      "ssim": 0.790083,
+      "ssim_drop_vs_fp32": 0.000594,
+      "ssim_recovered_pct": 86.7
     },
     {
       "n_fp32_layers": 6,
@@ -76,7 +96,10 @@
       ],
       "psnr": 27.43,
       "drop_vs_fp32": 0.0086,
-      "recovered_pct": 89.3
+      "recovered_pct": 89.3,
+      "ssim": 0.790128,
+      "ssim_drop_vs_fp32": 0.000549,
+      "ssim_recovered_pct": 87.7
     },
     {
       "n_fp32_layers": 7,
@@ -91,7 +114,10 @@
       ],
       "psnr": 27.4306,
       "drop_vs_fp32": 0.0079,
-      "recovered_pct": 90.1
+      "recovered_pct": 90.1,
+      "ssim": 0.790171,
+      "ssim_drop_vs_fp32": 0.000506,
+      "ssim_recovered_pct": 88.7
     },
     {
       "n_fp32_layers": 8,
@@ -107,7 +133,10 @@
       ],
       "psnr": 27.4312,
       "drop_vs_fp32": 0.0074,
-      "recovered_pct": 90.8
+      "recovered_pct": 90.8,
+      "ssim": 0.790202,
+      "ssim_drop_vs_fp32": 0.000475,
+      "ssim_recovered_pct": 89.3
     }
   ]
 }

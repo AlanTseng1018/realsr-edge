@@ -1,20 +1,90 @@
 # cpp_inference
 
-Minimal C++ ONNX Runtime reference for running EDSR-baseline as a single-image
-super-resolution command-line tool. Mirrors the Python `src/deployment/`
-inference path. The point of this directory:
+Two C++ entry points, both load the same ONNX export and run inference on a PNG. Pick by use case:
 
-1. **Reproduce the PyTorch model's output bit-for-bit (within FP32 tolerance) in C++.**
-   If C++ and Python disagree, the export pipeline is broken — fail there, not
-   silently downstream.
-2. **Show the deploy pattern.** Every TV-SoC NPU SDK (TensorRT, SNPE,
-   NeuroPilot, …) follows the same skeleton: load model file → prepare
-   input tensor → run → read output. Once this works, swapping ONNX RT for
-   a vendor SDK is mostly an API rename.
+| Entry point | Build system | EPs supported | Best for |
+|---|---|---|---|
+| **`edsr_runner.cpp`** (current) | `build.bat` (cl.exe direct) | CPU, CUDA, TensorRT | latency benchmark vs Python, cross-language correctness check |
+| `src/main.cpp` (V1 minimal reference) | `CMakeLists.txt` (CMake) | CPU only | bit-for-bit numerical parity vs PyTorch |
 
-The build is CPU-only on purpose: zero CUDA toolchain headache, runs anywhere,
-and "PyTorch CUDA vs ORT CUDA" speed comparisons live in the Python benchmark
-scripts where they belong.
+Both share the same *purpose*: prove the model runs in a real C++ runtime and the export pipeline is numerically faithful, the way every TV-SoC / edge JD assumes you can demonstrate. **They are not a TV product latency benchmark** -- the actual deploy target is a TV SoC NPU running a vendor SDK, not a consumer NVIDIA GPU. The numbers below are deployment-prep references, not product targets.
+
+## Validated results -- `edsr_runner.cpp` on RTX 3060 Laptop (consumer Ampere, sm86)
+
+### Apples-to-apples vs Python benchmark (96x96 LR -> 192x192 HR, matches training patch size)
+
+| EP | C++ latency | Python latency | Cross-language delta |
+|---|---:|---:|---:|
+| CUDA | 4.18 +/- 0.04 ms | 5.28 ms | C++ 21% faster (less wrapper overhead) |
+| TensorRT | 1.41 +/- 0.06 ms | 1.28 ms | within noise |
+
+PSNR matches Python within float-rounding noise -- confirms the C++ binary produces the same SR output as the Python pipeline. 96x96 LR is the **per-tile** number that would matter on a tile-based 1080p->4K pipeline (whether on this GPU or on an NPU), not a full-frame product latency.
+
+### Full-frame illustrative run (`0879.png`, 1020x936 LR -> 2040x1872 SR)
+
+20 timed iters per EP. *Not* a product target -- a 1080p frame on a TV product would be processed via tiling on the actual NPU, where absolute numbers will differ.
+
+| EP | Latency | PSNR vs HR (cross-EP correctness) |
+|---|---:|---:|
+| CPU | 18,853 +/- 162 ms | 29.450 dB |
+| CUDA | 795 +/- 3 ms | 29.450 dB |
+| TensorRT | 99 +/- 1 ms | 29.446 dB |
+
+PSNR matches across all three EPs to within float-rounding noise -- the **important result here** is the cross-EP correctness check, not the latency number. The full-frame latency is included only to show that the inference path scales correctly to large inputs.
+
+---
+
+## V2: `edsr_runner.cpp` -- full GPU-capable runner (recommended)
+
+A single ~290-line TU that loads HR PNG, bicubic-downsamples to LR, runs ORT inference on chosen EP, writes SR PNG, reports latency mean/std and PSNR vs HR.
+
+### Build
+
+Prerequisites:
+- VS 2022 BuildTools `cl.exe` (already installed in the dev environment)
+- ONNX Runtime 1.25.0 GPU prebuilt extracted to `../third_party/onnxruntime/` (~281 MB zip from microsoft/onnxruntime GitHub releases)
+- stb single-header libs in `../third_party/stb/`
+- CUDA 12.x runtime DLLs (we reuse the ones bundled by `torch` in the project venv -- no separate CUDA Toolkit install needed)
+- TensorRT 10.x runtime DLLs (reuse from `tensorrt_libs` Python wheel)
+
+```cmd
+build.bat
+```
+
+This calls `vcvars64.bat`, compiles against ORT headers, links `onnxruntime.lib`, and **copies ORT runtime DLLs next to the exe** so Windows DLL search picks them up before `C:\Windows\System32\onnxruntime.dll` (an older Windows-ML built-in 1.17.1 that would otherwise win).
+
+Output: `build/edsr_runner.exe` plus the bundled `onnxruntime*.dll`.
+
+### Run
+
+```cmd
+run.bat ^
+    --onnx ..\results\onnx_exports\edsr_200ep\edsr_fp32.onnx ^
+    --input ..\data\DIV2K\DIV2K_valid_HR\0879.png ^
+    --output sr.png ^
+    --provider tensorrt ^
+    --iters 20 --warmup 5
+```
+
+`run.bat` prepends `third_party/onnxruntime/lib`, `.venv/.../torch/lib`, and `.venv/.../tensorrt_libs` to PATH so the EP DLLs find their CUDA / TRT dependencies.
+
+CLI flags: `--onnx`, `--input`, `--output`, `--provider {cpu|cuda|tensorrt}`, `--scale`, `--iters`, `--warmup`. See `edsr_runner.cpp` for defaults.
+
+### Why bicubic LR (not realistic-degradation LR)
+
+The Python val pipeline uses `RealisticDegradation` (blur + banding + noise + JPEG) for accuracy benchmarks. Reproducing that pipeline in C++ would require porting the augmentations -- a separate engineering exercise that doesn't add deployment-pipeline value. Bicubic LR is deterministic, OpenCV-equivalent, and matches the `bicubic` track of `SRDataset` -- enough to prove the inference path works and produce a sensible PSNR cross-check.
+
+### Known limitations / next steps
+
+- **No INT8 path here.** ORT TRT EP with the QDQ INT8 ONNX hits the INT32-bias-DQ issue documented in `results/onnx_benchmark/edsr_200ep_full/deploy_summary.md` Section 8. Real INT8 deployment uses `benchmark_trt.py`'s native TRT API + calibrator path; the resulting `.engine` files in `results/trt_benchmark/edsr_200ep/engines/` would be loaded via `nvinfer1::IRuntime::deserializeCudaEngine` from a C++ binary linking against `NvInfer.h` + `nvinfer.lib`. That requires the TensorRT C++ SDK (~1 GB download, NVIDIA developer login). Out of scope for this V2; the artifact is ready when the toolchain is.
+- **OOM warnings on TRT EP build.** TensorRT explores tactics that may need more GPU memory than the 6 GB laptop GPU has and falls back automatically. The warnings are noisy but harmless.
+- **Static input shape.** The exported ONNX has fixed batch=1; running with a different input size triggers a one-time TRT re-build (cached under `trt_engine_cache/`).
+
+---
+
+## V1: `src/main.cpp` -- minimal CPU-only reference (bit-for-bit parity check)
+
+Kept as the original purpose: prove the PyTorch -> ONNX export is numerically faithful. CPU-only on purpose: zero CUDA toolchain headache, runs anywhere, and "PyTorch CUDA vs ORT CUDA" speed comparisons live in the Python benchmark scripts where they belong.
 
 ---
 
@@ -116,19 +186,19 @@ deploy-side benchmarks.
 
 ```
 cpp_inference/
-├── CMakeLists.txt        - find ONNX RT, compile sr_cli, copy DLL
 ├── README.md             - you are here
+├── edsr_runner.cpp       - V2: CPU/CUDA/TRT runner (~290 lines, today)
+├── build.bat             - V2 build (cl.exe + DLL copy)
+├── run.bat               - V2 launcher (DLL PATH wiring)
+├── CMakeLists.txt        - V1 CMake-based build for src/main.cpp
 ├── src/
-│   └── main.cpp          - end-to-end CLI in one file (~200 lines)
-├── third_party/
-│   └── stb/              - drop stb_image.h, stb_image_write.h here
-└── build/                - cmake output (gitignored)
+│   └── main.cpp          - V1 CPU-only reference (~200 lines)
+├── build/                - exe + bundled DLLs (gitignored)
+└── sr_*.png              - per-EP outputs from validation runs (gitignored)
+../third_party/            (gitignored)
+├── onnxruntime/          - ORT 1.25.0 GPU prebuilt (~370 MB extracted)
+└── stb/                  - stb_image.h, stb_image_write.h, stb_image_resize2.h
 ```
-
-We deliberately keep everything in one `main.cpp` for V1. Once we have a
-second use case (e.g. batched inference, video frames), the right move is
-to split into `inference.{cpp,h}` and `preprocess.{cpp,h}` per the project
-plan in `Project_Structure.txt`.
 
 ## Swapping in a vendor SDK
 

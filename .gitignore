@@ -43,3 +43,11 @@ cpp_inference/third_party/stb/*.h
 # across GPU model / SM version / TRT version -- see deployment_lessons_learned.md L5)
 **/trt_engine_cache/
 **/_trt_test_cache/
+**/engines/*.engine
+**/engines/*.cache
+
+# C++ inference: third-party deps, build artifacts, demo outputs
+third_party/
+cpp_inference/build/
+cpp_inference/sr_*.png
+cpp_inference/trt_engine_cache/

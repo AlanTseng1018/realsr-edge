@@ -34,10 +34,7 @@ Output folder structure::
 
 Run example::
 
-    python -m src.deployment.export_pipeline \\
-        --checkpoint results/runs/.../checkpoints/best.pt \\
-        --output-dir results/onnx_exports/edsr_200ep \\
-        --calib-samples 64
+    python -m src.deployment.export_pipeline --checkpoint results/runs/.../checkpoints/best.pt --output-dir results/onnx_exports/edsr_200ep --calib-samples 64
 """
 
 from __future__ import annotations
