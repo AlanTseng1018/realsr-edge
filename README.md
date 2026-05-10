@@ -103,10 +103,10 @@ Four orthogonal recipes are explored, each backed by a measurement artifact in `
 | § | Recipe axis | Question it answers |
 |---|---|---|
 | 2.2 | **Format shootout** | What does each precision option (FP32 / FP16 / BF16 / INT8 PTQ / INT8 QAT) cost on PSNR, SSIM, LPIPS, and on-disk size? |
-| 2.3 | **Calibration method** | Within INT8 PTQ, which calibration scheme is the safe default? |
-| 2.4 | **Per-layer sensitivity** | Which layers actually pay the INT8 quantization tax? |
-| 2.5 | **Mixed precision** | If we keep top-N sensitive layers in FP32, how much PSNR comes back, and where is the knee? |
-| 2.6 | **QAT fine-tuning** | When PTQ alone leaves too much on the table, does a short QAT phase recover it? |
+| 2.3 | **QAT fine-tuning** | The training-time recipe behind the INT8 QAT row in §2.2 — schedule, why the conservative 20ep / lr=1e-5 default? |
+| 2.4 | **Calibration method** | Within INT8 PTQ, which calibration scheme is the safe default? |
+| 2.5 | **Per-layer sensitivity** | Which layers actually pay the INT8 quantization tax? |
+| 2.6 | **Mixed precision** | If we keep top-N sensitive layers in FP32, how much PSNR comes back, and where is the knee? |
 
 ### 2.2 Format shootout — FP32 / FP16 / BF16 / INT8 PTQ / INT8 QAT
 
@@ -128,7 +128,7 @@ Two non-obvious rows: the **FP32 (QAT weights)** row isolates the *training-time
 **How to reproduce**
 
 ```bash
-# FP32 / FP16 / BF16 / INT8 PTQ rows (also runs sensitivity in 2.4 unless skipped)
+# FP32 / FP16 / BF16 / INT8 PTQ rows (also runs sensitivity in 2.5 unless skipped)
 python -m src.quantization.analyze \
     --checkpoint results/runs/<fp32_run>/checkpoints/best.pt \
     --output-dir results/quantization/200ep_with_report
@@ -144,7 +144,35 @@ python -m src.quantization.eval_qat \
 **Scripts** — [src/quantization/analyze.py](src/quantization/analyze.py) (shootout entry; LPIPS via `lpips` SqueezeNet backbone), [src/quantization/eval_qat.py](src/quantization/eval_qat.py) (QAT row appender)
 **Outputs** — [results/quantization/200ep_with_report/shootout.md](results/quantization/200ep_with_report/shootout.md) · [shootout.csv](results/quantization/200ep_with_report/shootout.csv)
 
-### 2.3 Calibration ablation — max-abs vs percentile
+### 2.3 QAT fine-tuning
+
+Recipe (implemented in [src/training/train.py:404-551](src/training/train.py#L404-L551), `--qat` flag):
+
+1. Load the FP32 `best.pt`.
+2. Wrap every `Conv2d` with `CalibratingConv2d` (fake-quant + activation scale buffer).
+3. Run a short calibration pass on training data (default 20 batches) to set per-tensor activation `amax`, then freeze scales.
+4. Switch to **QAT mode** (fake-quant on, weight gradients via Straight-Through Estimator) and fine-tune.
+5. Default schedule — **20 epochs, lr = 1e-5** (10× smaller than base), CosineAnnealingLR. Validation runs in *quantize mode* (clean fake-INT8 measurement, no STE noise leaking into PSNR).
+
+The conservative LR is intentional: the model is already converged, the fine-tune only needs to absorb quantization noise. Going to 50 epochs / 5e-5 rarely helps in our experiments and risks regression — full reasoning in [learning/when_to_use_qat.md](learning/when_to_use_qat.md).
+
+![QAT fine-tuning curves](results/runs/20260430_223739_ep0_b16_scale2_realistic_qat/curves.png)
+*20-epoch QAT fine-tune at lr=1e-5 evaluated in fake-INT8 mode. Validation PSNR climbs ~0.04 dB from the calibration starting point to **27.446 dB** (best ep 19); training L1 loss is noisy but stays in a tight band — no regression, supporting the conservative schedule over 50ep / 5e-5.*
+
+**How to reproduce**
+
+```bash
+# Train FP32 then QAT in one shot
+python -m src.training.train --compile --qat
+
+# QAT only (skip FP32 phase) starting from an existing checkpoint
+python -m src.training.train --epochs 0 --qat \
+    --qat-from results/runs/<fp32_run>/checkpoints/best.pt
+```
+
+**Output** — Each QAT run writes a separate `<run>_qat/` directory next to the FP32 run, with `best_qat.pt`, QAT-phase `curves.png`, and `metrics.csv` so the FP32 baseline is preserved untouched.
+
+### 2.4 Calibration ablation — max-abs vs percentile
 
 Within INT8 PTQ, the calibration scheme is the first knob a vendor will turn. This compares four schemes on the same model:
 
@@ -171,14 +199,14 @@ python -m src.quantization.calibration_ablation \
 **Script** — [src/quantization/calibration_ablation.py](src/quantization/calibration_ablation.py)
 **Output** — [results/quantization/calibration_ablation/calibration_ablation.md](results/quantization/calibration_ablation/calibration_ablation.md) · [ablation.csv](results/quantization/calibration_ablation/ablation.csv) · [histograms.png](results/quantization/calibration_ablation/histograms.png)
 
-### 2.4 Per-layer sensitivity
+### 2.5 Per-layer sensitivity
 
 Each of the 36 Conv2d layers is INT8-quantized in isolation while the rest stay FP32. The PSNR drop for that single layer is the layer's *sensitivity score*.
 
 The top of the ranking is concentrated and intuitive: pixel-shuffle / final-projection / first-conv layers hurt the most.
 
 ![per-layer isolated INT8 sensitivity](results/layer_analysis/edsr_200ep/sensitivity.png)
-*All 36 Conv2d layers ranked by output-fidelity PSNR (FP32 output vs single-layer-INT8 output). Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.5.*
+*All 36 Conv2d layers ranked by output-fidelity PSNR (FP32 output vs single-layer-INT8 output). Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.6.*
 
 | Rank | Layer | PSNR drop (dB) when this layer is INT8 alone |
 |---|---|---|
@@ -194,9 +222,9 @@ The top of the ranking is concentrated and intuitive: pixel-shuffle / final-proj
 
 **Output** — [sensitivity.md](results/quantization/200ep_with_report/sensitivity.md) · [sensitivity.csv](results/quantization/200ep_with_report/sensitivity.csv)
 
-### 2.5 Mixed-precision sweep — PTQ vs QAT
+### 2.6 Mixed-precision sweep — PTQ vs QAT
 
-Walk N from 0 to 8: keep the top-N most-sensitive layers (per 2.4) in FP32, INT8 the rest, measure PSNR. Run the sweep twice — once over the PTQ baseline, once over the QAT-trained weights — and overlay.
+Walk N from 0 to 8: keep the top-N most-sensitive layers (per 2.5) in FP32, INT8 the rest, measure PSNR. Run the sweep twice — once over the PTQ baseline, once over the QAT-trained weights — and overlay.
 
 ![PTQ vs QAT mixed precision sweep](results/mixed_precision/ptq_vs_qat_sweep.png)
 
@@ -237,41 +265,13 @@ python -m src.deployment.compare_mixed_precision \
 **Scripts** — [src/deployment/mixed_precision.py](src/deployment/mixed_precision.py) · [src/deployment/compare_mixed_precision.py](src/deployment/compare_mixed_precision.py)
 **Outputs** — [results/mixed_precision/edsr_200ep/](results/mixed_precision/edsr_200ep/) · [results/mixed_precision/edsr_200ep_qat/](results/mixed_precision/edsr_200ep_qat/) · [ptq_vs_qat_sweep.png](results/mixed_precision/ptq_vs_qat_sweep.png)
 
-### 2.6 QAT fine-tuning
-
-Recipe (implemented in [src/training/train.py:404-551](src/training/train.py#L404-L551), `--qat` flag):
-
-1. Load the FP32 `best.pt`.
-2. Wrap every `Conv2d` with `CalibratingConv2d` (fake-quant + activation scale buffer).
-3. Run a short calibration pass on training data (default 20 batches) to set per-tensor activation `amax`, then freeze scales.
-4. Switch to **QAT mode** (fake-quant on, weight gradients via Straight-Through Estimator) and fine-tune.
-5. Default schedule — **20 epochs, lr = 1e-5** (10× smaller than base), CosineAnnealingLR. Validation runs in *quantize mode* (clean fake-INT8 measurement, no STE noise leaking into PSNR).
-
-The conservative LR is intentional: the model is already converged, the fine-tune only needs to absorb quantization noise. Going to 50 epochs / 5e-5 rarely helps in our experiments and risks regression — full reasoning in [learning/when_to_use_qat.md](learning/when_to_use_qat.md).
-
-![QAT fine-tuning curves](results/runs/20260430_223739_ep0_b16_scale2_realistic_qat/curves.png)
-*20-epoch QAT fine-tune at lr=1e-5 evaluated in fake-INT8 mode. Validation PSNR climbs ~0.04 dB from the calibration starting point to **27.446 dB** (best ep 19); training L1 loss is noisy but stays in a tight band — no regression, supporting the conservative schedule over 50ep / 5e-5.*
-
-**How to reproduce**
-
-```bash
-# Train FP32 then QAT in one shot
-python -m src.training.train --compile --qat
-
-# QAT only (skip FP32 phase) starting from an existing checkpoint
-python -m src.training.train --epochs 0 --qat \
-    --qat-from results/runs/<fp32_run>/checkpoints/best.pt
-```
-
-**Output** — Each QAT run writes a separate `<run>_qat/` directory next to the FP32 run, with `best_qat.pt`, QAT-phase `curves.png`, and `metrics.csv` so the FP32 baseline is preserved untouched.
-
 ### 2.7 Decision package — what the vendor receives
 
 | Question | Recipe (this repo's first answer) | Reasoning anchor |
 |---|---|---|
-| Default INT8 calibration? | `max-abs` | 2.3 — spread vs percentile-99.99 < 0.01 dB |
-| First mixed-precision target? | top-2 FP32: `tail` + `upsampler.0` | 2.4/2.5 — 73% of the FP32-vs-INT8 PSNR gap recovered |
-| When to invest in QAT? | If PTQ drop > 0.2 dB *or* vendor has no FP32 fallback | 2.5 — QAT all-INT8 already exceeds original FP32 baseline |
+| Default INT8 calibration? | `max-abs` | 2.4 — spread vs percentile-99.99 < 0.01 dB |
+| First mixed-precision target? | top-2 FP32: `tail` + `upsampler.0` | 2.5/2.6 — 73% of the FP32-vs-INT8 PSNR gap recovered |
+| When to invest in QAT? | If PTQ drop > 0.2 dB *or* vendor has no FP32 fallback | 2.6 — QAT all-INT8 already exceeds original FP32 baseline |
 | Acceptable Native FP16 / BF16? | Both: FP16 is identical, BF16 within 0.02 dB | 2.2 — keep as ½-size fallbacks |
 
 Each row is intentionally a **path**, not a final config: the vendor can adapt — re-rank layers on their own data, re-run the sweep against their hardware's mixed-precision support, swap calibration to percentile if their distribution warrants it. Three classes are deliberately *out of scope* (architecture choice, INT4 / mixed-bit, customer-distribution edge cases) and surfaced in section 4 rather than hidden — see [learning/senior_deliverable_framing.md](learning/senior_deliverable_framing.md) for the full rationale.
