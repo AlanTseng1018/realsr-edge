@@ -308,7 +308,7 @@ PSNR (provider-invariant within float-rounding noise): FP32 27.439 / FP16 27.438
 
 **Two findings worth surfacing**:
 
-- **FP16 / TensorRT EP is the optimum on this hardware** — 2.6× faster than FP32 / TensorRT EP, with ~zero PSNR cost.
+- **FP16 / TensorRT EP is the optimum on this hardware** — 2.6× faster than FP32 / TensorRT EP, with ~zero PSNR cost. Three factors compound: **(1) tensor-core preference** — Ampere tensor cores hit ~2× FP32 throughput in FP16 (FP16 matmul, FP32 accumulate); **(2) graph fusion** — TensorRT EP compiles the conv graph into single tensor-core kernels, while CUDA EP runs op-by-op via cuDNN with no fusion. The numerical fingerprint: TRT EP delivers a 2.56× FP16 speedup (3.28 → 1.28 ms), CUDA EP only 1.30× (5.28 → 4.05 ms) at the same precision — without fusion, kernel-launch overhead absorbs much of the FP16 win; **(3) halved DRAM read** — FP16 weights are half the bytes, a smaller cumulative tailwind on this compute-bound workload. **Evidence**: §3.4 roofline confirms FP16 reaches the highest tensor-core utilization of the three precisions tested — 84% of peak (FP32 73%, INT8 64%).
 - **INT8 is slower than FP16 across all three EPs** — including TRT EP (4.33 vs 1.28 ms). That is unexpected for a "4× quantized" model. §3.3 traces the cause to a backend-fusion failure, not a fundamental INT8 limitation.
 
 **How to reproduce**
