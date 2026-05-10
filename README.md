@@ -148,6 +148,9 @@ python -m src.quantization.eval_qat \
 
 Within INT8 PTQ, the calibration scheme is the first knob a vendor will turn. This compares four schemes on the same model:
 
+![calibration scheme amax vs activation distribution](results/quantization/calibration_ablation/histograms.png)
+*Per-layer activation magnitude distribution with each scheme's chosen `amax` overlaid (dashed lines). Visual reason for the cliff: percentile-99.0 cuts into the body of the distribution at every layer; max-abs and percentile-99.99 sit at the tail edge.*
+
 | Scheme | PSNR (dB) | ΔPSNR vs FP32 | SSIM | Comment |
 |---|---|---|---|---|
 | max-abs | 27.364 | −0.075 | 0.7866 | default; preserves outlier weights |
@@ -173,6 +176,9 @@ python -m src.quantization.calibration_ablation \
 Each of the 36 Conv2d layers is INT8-quantized in isolation while the rest stay FP32. The PSNR drop for that single layer is the layer's *sensitivity score*.
 
 The top of the ranking is concentrated and intuitive: pixel-shuffle / final-projection / first-conv layers hurt the most.
+
+![per-layer isolated INT8 sensitivity](results/layer_analysis/edsr_200ep/sensitivity.png)
+*All 36 Conv2d layers ranked by output-fidelity PSNR (FP32 output vs single-layer-INT8 output). Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.5.*
 
 | Rank | Layer | PSNR drop (dB) when this layer is INT8 alone |
 |---|---|---|
@@ -242,6 +248,9 @@ Recipe (implemented in [src/training/train.py:404-551](src/training/train.py#L40
 5. Default schedule — **20 epochs, lr = 1e-5** (10× smaller than base), CosineAnnealingLR. Validation runs in *quantize mode* (clean fake-INT8 measurement, no STE noise leaking into PSNR).
 
 The conservative LR is intentional: the model is already converged, the fine-tune only needs to absorb quantization noise. Going to 50 epochs / 5e-5 rarely helps in our experiments and risks regression — full reasoning in [learning/when_to_use_qat.md](learning/when_to_use_qat.md).
+
+![QAT fine-tuning curves](results/runs/20260430_223739_ep0_b16_scale2_realistic_qat/curves.png)
+*20-epoch QAT fine-tune at lr=1e-5 evaluated in fake-INT8 mode. Validation PSNR climbs ~0.04 dB from the calibration starting point to **27.446 dB** (best ep 19); training L1 loss is noisy but stays in a tight band — no regression, supporting the conservative schedule over 50ep / 5e-5.*
 
 **How to reproduce**
 
