@@ -134,65 +134,67 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
                 "latency_std": float(r["latency_ms_std"]),
             })
 
-    # PSNR is provider-invariant within rounding noise — average per precision.
+    psnr_lookup = {(r["precision"], r["provider"]): r["psnr"] for r in rows}
+    lat_lookup = {
+        (r["precision"], r["provider"]): (r["latency"], r["latency_std"])
+        for r in rows
+    }
+
     by_prec: dict[str, list[float]] = {}
     for r in rows:
         by_prec.setdefault(r["precision"], []).append(r["psnr"])
     psnr_means = {p: sum(v) / len(v) for p, v in by_prec.items()}
     psnr_spread_max = max(max(v) - min(v) for v in by_prec.values())
 
-    lat_lookup = {
-        (r["precision"], r["provider"]): (r["latency"], r["latency_std"])
-        for r in rows
-    }
+    precisions = ["FP32", "FP16", "INT8"]
+    providers = ["tensorrt", "cuda", "cpu"]
+    provider_labels = ["TensorRT EP", "CUDA EP", "CPU EP"]
+    x = np.arange(len(providers))
+    width = 0.27
 
     fig, (ax_psnr, ax_lat) = plt.subplots(
-        2, 1, figsize=(12, 9.5),
-        gridspec_kw={"height_ratios": [1.0, 1.45], "hspace": 0.32},
+        2, 1, figsize=(13, 10),
+        gridspec_kw={"height_ratios": [1.0, 1.25], "hspace": 0.34},
     )
 
-    # === Top: PSNR by precision (provider-invariant) ===
-    precisions = ["FP32", "FP16", "INT8"]
-    psnr_vals = [psnr_means[p] for p in precisions]
-    bars_psnr = ax_psnr.bar(
-        precisions, psnr_vals,
-        color=[PREC_COLOR[p] for p in precisions],
-        edgecolor="#222", linewidth=0.9, width=0.55,
-    )
-    for bar, val in zip(bars_psnr, psnr_vals):
-        ax_psnr.text(
-            bar.get_x() + bar.get_width() / 2, val + 0.005,
-            f"{val:.3f}", ha="center", fontsize=11.5, fontweight="bold",
+    # === Top: PSNR — 9 grouped bars matching bottom panel structure ===
+    fp32_ref = psnr_means["FP32"]
+    for i, prec in enumerate(precisions):
+        psnr_vals = [psnr_lookup[(prec, prov)] for prov in providers]
+        offset = (i - 1) * width
+        delta = psnr_means[prec] - fp32_ref
+        legend_label = (
+            f"{prec} (baseline)" if prec == "FP32"
+            else f"{prec} (Δ {delta:+.3f} dB vs FP32)"
         )
-
-    # ΔPSNR vs FP32 annotations under each bar
-    fp32 = psnr_means["FP32"]
-    for bar, prec in zip(bars_psnr, precisions):
-        delta = psnr_means[prec] - fp32
-        if prec == "FP32":
-            txt = "baseline"
-        else:
-            txt = f"Δ {delta:+.3f} dB"
-        ax_psnr.text(
-            bar.get_x() + bar.get_width() / 2, 27.215,
-            txt, ha="center", fontsize=9.5, color="#444", style="italic",
+        bars = ax_psnr.bar(
+            x + offset, psnr_vals, width,
+            label=legend_label,
+            color=PREC_COLOR[prec],
+            edgecolor="#222", linewidth=0.9,
         )
+        for bar, val in zip(bars, psnr_vals):
+            ax_psnr.text(
+                bar.get_x() + bar.get_width() / 2, val + 0.004,
+                f"{val:.3f}", ha="center", fontsize=8.5, color="#222",
+            )
 
-    ax_psnr.set_ylim(27.20, 27.47)
+    ax_psnr.set_ylim(27.20, 27.48)
+    ax_psnr.set_xticks(x)
+    ax_psnr.set_xticklabels(provider_labels, fontsize=11)
     ax_psnr.set_ylabel("Validation PSNR (dB)  ↑", fontsize=11.5)
     ax_psnr.set_title(
-        "Accuracy — PSNR by precision  "
+        "Accuracy — PSNR by precision × provider  "
         f"(provider-invariant: cross-EP spread ≤ {psnr_spread_max:.3f} dB)",
         fontsize=12, fontweight="bold", pad=8,
     )
+    ax_psnr.legend(
+        title="Precision", loc="lower left",
+        fontsize=9.5, title_fontsize=10.5, framealpha=0.95,
+    )
     ax_psnr.grid(axis="y", alpha=0.3)
 
-    # === Bottom: latency, grouped bars (x = EP, hue = precision) ===
-    providers = ["tensorrt", "cuda", "cpu"]
-    provider_labels = ["TensorRT EP", "CUDA EP", "CPU EP"]
-    width = 0.27
-    x = np.arange(len(providers))
-
+    # === Bottom: latency — 9 grouped bars (same structure) ===
     for i, prec in enumerate(precisions):
         lat_vals = [lat_lookup[(prec, prov)][0] for prov in providers]
         lat_stds = [lat_lookup[(prec, prov)][1] for prov in providers]
@@ -225,10 +227,9 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
     )
     ax_lat.grid(axis="y", which="both", alpha=0.3, linestyle=":")
 
-    # Star-mark the FP16/TRT optimum bar
-    fp16_trt_x = 0 + 0 * width  # FP16 is the middle bar (i=1, offset=0)
+    # Star-mark the FP16/TRT optimum bar (FP16 is the middle bar at x=0)
     ax_lat.text(
-        fp16_trt_x, 1.28 / 1.5, "★",
+        0.0, 1.28 / 1.5, "★",
         ha="center", va="center", fontsize=20, color="#d4a017",
         zorder=5,
     )

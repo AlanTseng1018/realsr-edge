@@ -294,7 +294,7 @@ Each row is intentionally a **path**, not a final config: the vendor can adapt �
 A single ONNX export goes into ONNX Runtime with three execution providers. Same model, same val set, three backends → nine cells.
 
 ![PSNR by precision (top) and latency by provider × precision (bottom)](results/onnx_benchmark/edsr_200ep_full/precision_ep_breakdown.png)
-*Top — PSNR by precision: provider-invariant within rounding noise (cross-EP spread ≤ 0.002 dB), so PSNR is purely a function of precision; INT8 drops 0.171 dB, FP16 vs FP32 is essentially zero. Bottom — per-tile latency on log scale, grouped by EP, hue by precision. ★ marks FP16 / TensorRT EP at 1.28 ms (the optimum on this hardware). INT8 is anomalously slower than FP16 across all three EPs — that anomaly is traced in §3.3.*
+*Both panels share the same 3×3 grouping (x = EP, hue = precision), so the two reads top-to-bottom against a common axis. **Top — PSNR**: three near-identical bars per precision visualize provider invariance (cross-EP spread ≤ 0.002 dB) — PSNR is a function of precision, not of backend. INT8 drops 0.171 dB; FP16 vs FP32 is essentially zero. **Bottom — per-tile latency** (log scale): ★ marks FP16 / TensorRT EP at 1.28 ms (the optimum on this hardware). INT8 is anomalously slower than FP16 across all three EPs — that anomaly is traced in §3.3.*
 
 **Headline matrix** — latency per per-tile inference (ms ↓, lower is better):
 
