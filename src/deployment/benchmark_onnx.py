@@ -146,17 +146,21 @@ def session_input_dtype(session: ort.InferenceSession) -> np.dtype:
 def evaluate_metrics_onnx(
     session: ort.InferenceSession,
     val_loader: DataLoader,
-) -> tuple[float, float]:
-    """Mean per-image (PSNR dB, SSIM) over the val loader via the ORT session.
+    lpips_model: "torch.nn.Module | None" = None,
+    lpips_device: "torch.device | None" = None,
+) -> tuple[float, float, "float | None"]:
+    """Mean per-image (PSNR dB, SSIM, LPIPS) over the val loader via the ORT session.
 
-    Both metrics are computed on the same tensor pair so the deploy-side
+    All three metrics are computed on the same tensor pair so deploy-side
     numbers stay apples-to-apples with the train / fake-quant pipelines.
+    LPIPS uses the SqueezeNet backbone (matches §2.2's quantization analysis);
+    the LPIPS slot is ``None`` when ``lpips_model`` is not provided.
     """
     in_name = session.get_inputs()[0].name
     out_name = session.get_outputs()[0].name
     in_dtype = session_input_dtype(session)
 
-    psnr_sum, ssim_sum, count = 0.0, 0.0, 0
+    psnr_sum, ssim_sum, lpips_sum, count = 0.0, 0.0, 0.0, 0
     for lr, hr in val_loader:
         lr_np = lr.numpy().astype(in_dtype)
         sr_np = session.run([out_name], {in_name: lr_np})[0]
@@ -178,9 +182,21 @@ def evaluate_metrics_onnx(
                 channel_axis=2,
             ))
 
+        if lpips_model is not None:
+            # LPIPS expects inputs in [-1, 1]; sr/hr are in [0, 1].
+            sr_lp = (sr * 2.0 - 1.0).to(lpips_device)
+            hr_lp = (hr * 2.0 - 1.0).to(lpips_device)
+            with torch.no_grad():
+                d = lpips_model(sr_lp, hr_lp)
+            lpips_sum += float(d.flatten().sum().item())
+
         count += psnr.numel()
     n = max(count, 1)
-    return psnr_sum / n, ssim_sum / n
+    return (
+        psnr_sum / n,
+        ssim_sum / n,
+        (lpips_sum / n) if lpips_model is not None else None,
+    )
 
 
 def benchmark_latency_onnx(
@@ -248,6 +264,11 @@ def write_benchmark_md(
          if r["precision"] == "FP32" and r.get("ssim") is not None),
         None,
     )
+    fp32_lpips = next(
+        (r["lpips"] for r in rows
+         if r["precision"] == "FP32" and r.get("lpips") is not None),
+        None,
+    )
     fp32_lat_per_provider: dict[str, float] = {
         r["provider"]: r["latency_ms_mean"]
         for r in rows
@@ -279,8 +300,9 @@ def write_benchmark_md(
         # Main shootout table
         f.write("## Shootout table\n\n")
         f.write("| ONNX | Provider | PSNR (dB) | PSNR drop | SSIM | SSIM drop | "
+                "LPIPS | LPIPS drop | "
                 "Latency (ms) | Speedup vs FP32 same-provider | Size (MB) |\n")
-        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|\n")
+        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for r in rows:
             psnr = (
                 f"{r['psnr_db']:.3f}"
@@ -299,6 +321,16 @@ def write_benchmark_md(
                 ssim_drop = "n/a"
             else:
                 ssim_drop = f"{fp32_ssim - r['ssim']:+.4f}"
+
+            lpips_val_s = (
+                f"{r['lpips']:.4f}"
+                if r.get("lpips") is not None else "n/a"
+            )
+            if r.get("lpips") is None or fp32_lpips is None:
+                lpips_drop = "n/a"
+            else:
+                # LPIPS lower = better, so report as +/- vs FP32 (positive = worse)
+                lpips_drop = f"{r['lpips'] - fp32_lpips:+.4f}"
 
             if r["latency_ms_mean"] is not None:
                 lat = f"{r['latency_ms_mean']:.2f} +/- {r['latency_ms_std']:.2f}"
@@ -319,6 +351,7 @@ def write_benchmark_md(
 
             f.write(f"| `{r['onnx']}` | `{r['provider']}` | "
                     f"{psnr} | {drop} | {ssim_val} | {ssim_drop} | "
+                    f"{lpips_val_s} | {lpips_drop} | "
                     f"{lat} | {speedup} | {size_mb} |\n")
         f.write("\n")
 
@@ -336,9 +369,16 @@ def write_benchmark_md(
                 "loss. Disagreement between PSNR and SSIM rankings is a "
                 "signal that the precision is hurting structure (edges) more "
                 "than bulk fidelity, or vice versa.\n")
-        f.write("- **Drop vs FP32** uses the FP32 PSNR / SSIM as baseline. "
-                "Should match (within ~0.1 dB / ~0.001 SSIM) the fake-quant "
-                "prediction in "
+        f.write("- **LPIPS** is the perceptual distance from a SqueezeNet "
+                "feature embedding (lower = more perceptually similar to "
+                "GT; same backbone as §2.2's quantization analysis so the "
+                "numbers are directly comparable). Often disagrees with PSNR "
+                "— INT8 frequently *reduces* LPIPS even when PSNR drops, "
+                "because the quantization noise pattern is closer to natural "
+                "image statistics than the FP32 baseline's smoother output.\n")
+        f.write("- **Drop vs FP32** uses the FP32 PSNR / SSIM / LPIPS as "
+                "baseline. Should match (within ~0.1 dB / ~0.001 SSIM / "
+                "~0.005 LPIPS) the fake-quant prediction in "
                 "`results/quantization/200ep_with_report/report.md`.\n")
         f.write("- **Latency** is forward-pass only. **Provider-specific**: "
                 "INT8 ONNX often runs slower on CUDA EP than FP32 due to "
@@ -389,6 +429,10 @@ def parse_args() -> argparse.Namespace:
                    help="Input shape for latency benchmark, NxCxHxW (default 1x3x96x96)")
     p.add_argument("--n-warmup", type=int, default=10)
     p.add_argument("--n-iter", type=int, default=50)
+    p.add_argument("--lpips", dest="with_lpips", action="store_true", default=True,
+                   help="Compute LPIPS via lpips SqueezeNet backbone (default on; matches §2.2)")
+    p.add_argument("--no-lpips", dest="with_lpips", action="store_false",
+                   help="Skip LPIPS computation (faster benchmark)")
     return p.parse_args()
 
 
@@ -439,6 +483,22 @@ def main() -> None:
     for p in onnx_files:
         size_mb = p.stat().st_size / (1024 * 1024)
         print(f"    - {p.name} ({size_mb:.2f} MB, {precision_of(p.name)})")
+
+    # LPIPS model — built once, reused across (ONNX × EP) cells.
+    lpips_model = None
+    lpips_device = None
+    if args.with_lpips:
+        try:
+            import lpips as lpips_pkg
+            lpips_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            lpips_model = lpips_pkg.LPIPS(net="squeeze", verbose=False).to(lpips_device).eval()
+            print(f"  LPIPS  : SqueezeNet backbone on {lpips_device}")
+        except Exception as e:
+            print(f"  LPIPS unavailable ({e}); proceeding without LPIPS")
+            lpips_model = None
+            lpips_device = None
+    else:
+        print("  LPIPS  : skipped (--no-lpips)")
     print()
 
     # TensorRT engine cache lives next to the report so it's "owned" by this
@@ -472,6 +532,7 @@ def main() -> None:
                 "size_mb": size_mb,
                 "psnr_db": None,
                 "ssim": None,
+                "lpips": None,
                 "latency_ms_mean": None,
                 "latency_ms_std": None,
                 "session_build_ms": sess_build_ms,
@@ -492,9 +553,12 @@ def main() -> None:
                 print(f"(session build: {sess_build_ms:.0f} ms) ", end="", flush=True)
 
             try:
-                psnr, ssim = evaluate_metrics_onnx(session, val_loader)
+                psnr, ssim, lpips_val = evaluate_metrics_onnx(
+                    session, val_loader, lpips_model, lpips_device,
+                )
                 row["psnr_db"] = psnr
                 row["ssim"] = ssim
+                row["lpips"] = lpips_val
             except Exception as e:
                 row["error"] = f"metrics failed: {e!s}"
                 rows.append(row)
@@ -517,7 +581,8 @@ def main() -> None:
                 continue
 
             rows.append(row)
-            print(f"PSNR={psnr:.3f} dB | SSIM={ssim:.4f} | "
+            lpips_str = f" | LPIPS={lpips_val:.4f}" if lpips_val is not None else ""
+            print(f"PSNR={psnr:.3f} dB | SSIM={ssim:.4f}{lpips_str} | "
                   f"latency={lat_mean:.2f} +/- {lat_std:.2f} ms "
                   f"(active_ep={row['active_provider']})")
 

@@ -293,8 +293,8 @@ Each row is intentionally a **path**, not a final config: the vendor can adapt �
 
 A single ONNX export goes into ONNX Runtime with three execution providers. Same model, same val set, three backends → nine cells.
 
-![PSNR by precision (top) and latency by provider × precision (bottom)](results/onnx_benchmark/edsr_200ep_full/precision_ep_breakdown.png)
-*Both panels share the same 3×3 grouping (x = EP, hue = precision), so the two reads top-to-bottom against a common axis. **Top — PSNR**: three near-identical bars per precision visualize provider invariance (cross-EP spread ≤ 0.002 dB) — PSNR is a function of precision, not of backend. INT8 drops 0.171 dB; FP16 vs FP32 is essentially zero. **Bottom — per-tile latency** (log scale): ★ marks FP16 / TensorRT EP at 1.28 ms (the optimum on this hardware). INT8 is anomalously slower than FP16 across all three EPs — that anomaly is traced in §3.3.*
+![PSNR / LPIPS / latency by precision × provider](results/onnx_benchmark/edsr_200ep_full/precision_ep_breakdown.png)
+*All three panels share the same 3×3 grouping (x = EP, hue = precision), so they read top-to-bottom against a common axis. **Top — PSNR**: three near-identical bars per precision visualize provider invariance (cross-EP spread ≤ 0.002 dB); INT8 drops 0.171 dB, FP16 vs FP32 is essentially zero. **Middle — LPIPS** (perceptual distance, lower = better): same provider-invariance pattern (cross-EP spread ≤ 0.0006). INT8 drops from 0.211 to 0.184 — a perceptual *gain*, even though PSNR drops. **This confirms §2.2's PyTorch fake-quant finding survives ONNX export** (and the deploy-side INT8 LPIPS 0.184 is even slightly better than fake-quant's 0.196 prediction). **Bottom — per-tile latency** (log scale): ★ marks FP16 / TensorRT EP at 1.28 ms (the optimum on this hardware). INT8 is anomalously slower than FP16 across all three EPs — that anomaly is traced in §3.3.*
 
 **Headline matrix** — latency per per-tile inference (ms ↓, lower is better):
 
@@ -304,12 +304,13 @@ A single ONNX export goes into ONNX Runtime with three execution providers. Same
 | FP16 | **1.28 ± 0.06** | 4.05 ± 0.99 | 50.55 ± 2.81 |
 | INT8 | 4.33 ± 3.47 | 6.57 ± 1.70 | 56.25 ± 4.43 |
 
-PSNR (provider-invariant within float-rounding noise): FP32 27.439 / FP16 27.438 / INT8 27.268 dB.
+**Accuracy** (provider-invariant within float noise): FP32 **27.439 dB / 0.2108 LPIPS** · FP16 27.438 / 0.2108 · INT8 27.268 / **0.1841** ↓ (INT8 PSNR drops 0.171 dB but LPIPS *improves* by 0.027 — perceptual gain at deploy level).
 
-**Two findings worth surfacing**:
+**Three findings worth surfacing**:
 
 - **FP16 / TensorRT EP is the optimum on this hardware** — 2.6× faster than FP32 / TensorRT EP, with ~zero PSNR cost. Three factors compound: **(1) tensor-core preference** — Ampere tensor cores hit ~2× FP32 throughput in FP16 (FP16 matmul, FP32 accumulate); **(2) graph fusion** — TensorRT EP compiles the conv graph into single tensor-core kernels, while CUDA EP runs op-by-op via cuDNN with no fusion. The numerical fingerprint: TRT EP delivers a 2.56× FP16 speedup (3.28 → 1.28 ms), CUDA EP only 1.30× (5.28 → 4.05 ms) at the same precision — without fusion, kernel-launch overhead absorbs much of the FP16 win; **(3) halved DRAM read** — FP16 weights are half the bytes, a smaller cumulative tailwind on this compute-bound workload. **Evidence**: §3.4 roofline confirms FP16 reaches the highest tensor-core utilization of the three precisions tested — 84% of peak (FP32 73%, INT8 64%).
 - **INT8 is slower than FP16 across all three EPs** — including TRT EP (4.33 vs 1.28 ms). That is unexpected for a "4× quantized" model. §3.3 traces the cause to a backend-fusion failure, not a fundamental INT8 limitation.
+- **INT8's perceptual gain survives ONNX deploy** — LPIPS drops from 0.211 (FP32) to 0.184 (INT8), a 12.7% perceptual *improvement* despite PSNR dropping 0.17 dB. §2.2's PyTorch fake-quant predicted LPIPS 0.196 for INT8; the ONNX deploy measurement at 0.184 is **better than the fake-quant prediction**, so the perceptual benefit is not a fake-quant simulation artifact — it ports cleanly to actual deployment. Mechanism: INT8 quantization noise has frequency content closer to natural image statistics than FP32's smoother output, which reads as "more textured" to a CNN-feature-based perceptual metric.
 
 **How to reproduce**
 

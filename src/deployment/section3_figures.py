@@ -126,25 +126,37 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
     rows = []
     with csv_path.open(encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            rows.append({
+            row = {
                 "precision": r["precision"],
                 "provider": r["provider"],
                 "psnr": float(r["psnr_db"]),
                 "latency": float(r["latency_ms_mean"]),
                 "latency_std": float(r["latency_ms_std"]),
-            })
+            }
+            lpips_str = r.get("lpips", "").strip()
+            row["lpips"] = float(lpips_str) if lpips_str else None
+            rows.append(row)
 
     psnr_lookup = {(r["precision"], r["provider"]): r["psnr"] for r in rows}
+    lpips_lookup = {(r["precision"], r["provider"]): r["lpips"] for r in rows}
     lat_lookup = {
         (r["precision"], r["provider"]): (r["latency"], r["latency_std"])
         for r in rows
     }
+    has_lpips = all(v is not None for v in lpips_lookup.values())
 
-    by_prec: dict[str, list[float]] = {}
+    psnr_by_prec: dict[str, list[float]] = {}
     for r in rows:
-        by_prec.setdefault(r["precision"], []).append(r["psnr"])
-    psnr_means = {p: sum(v) / len(v) for p, v in by_prec.items()}
-    psnr_spread_max = max(max(v) - min(v) for v in by_prec.values())
+        psnr_by_prec.setdefault(r["precision"], []).append(r["psnr"])
+    psnr_means = {p: sum(v) / len(v) for p, v in psnr_by_prec.items()}
+    psnr_spread_max = max(max(v) - min(v) for v in psnr_by_prec.values())
+
+    if has_lpips:
+        lpips_by_prec: dict[str, list[float]] = {}
+        for r in rows:
+            lpips_by_prec.setdefault(r["precision"], []).append(r["lpips"])
+        lpips_means = {p: sum(v) / len(v) for p, v in lpips_by_prec.items()}
+        lpips_spread_max = max(max(v) - min(v) for v in lpips_by_prec.values())
 
     precisions = ["FP32", "FP16", "INT8"]
     providers = ["tensorrt", "cuda", "cpu"]
@@ -152,17 +164,24 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
     x = np.arange(len(providers))
     width = 0.27
 
-    fig, (ax_psnr, ax_lat) = plt.subplots(
-        2, 1, figsize=(13, 10),
-        gridspec_kw={"height_ratios": [1.0, 1.25], "hspace": 0.34},
-    )
+    if has_lpips:
+        fig, (ax_psnr, ax_lpips, ax_lat) = plt.subplots(
+            3, 1, figsize=(13, 13.5),
+            gridspec_kw={"height_ratios": [1.0, 1.0, 1.25], "hspace": 0.36},
+        )
+    else:
+        fig, (ax_psnr, ax_lat) = plt.subplots(
+            2, 1, figsize=(13, 10),
+            gridspec_kw={"height_ratios": [1.0, 1.25], "hspace": 0.34},
+        )
+        ax_lpips = None
 
-    # === Top: PSNR — 9 grouped bars matching bottom panel structure ===
-    fp32_ref = psnr_means["FP32"]
+    # === Panel 1: PSNR — 9 grouped bars ===
+    fp32_psnr_ref = psnr_means["FP32"]
     for i, prec in enumerate(precisions):
         psnr_vals = [psnr_lookup[(prec, prov)] for prov in providers]
         offset = (i - 1) * width
-        delta = psnr_means[prec] - fp32_ref
+        delta = psnr_means[prec] - fp32_psnr_ref
         legend_label = (
             f"{prec} (baseline)" if prec == "FP32"
             else f"{prec} (Δ {delta:+.3f} dB vs FP32)"
@@ -194,7 +213,49 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
     )
     ax_psnr.grid(axis="y", alpha=0.3)
 
-    # === Bottom: latency — 9 grouped bars (same structure) ===
+    # === Panel 2: LPIPS (perceptual distance, lower = better) ===
+    if has_lpips and ax_lpips is not None:
+        fp32_lpips_ref = lpips_means["FP32"]
+        for i, prec in enumerate(precisions):
+            lp_vals = [lpips_lookup[(prec, prov)] for prov in providers]
+            offset = (i - 1) * width
+            delta = lpips_means[prec] - fp32_lpips_ref
+            legend_label = (
+                f"{prec} (baseline)" if prec == "FP32"
+                else f"{prec} (Δ {delta:+.4f} vs FP32)"
+            )
+            bars = ax_lpips.bar(
+                x + offset, lp_vals, width,
+                label=legend_label,
+                color=PREC_COLOR[prec],
+                edgecolor="#222", linewidth=0.9,
+            )
+            for bar, val in zip(bars, lp_vals):
+                ax_lpips.text(
+                    bar.get_x() + bar.get_width() / 2, val + 0.0008,
+                    f"{val:.4f}", ha="center", fontsize=8.5, color="#222",
+                )
+
+        # Y-range: tight around observed values to make Δ visible
+        all_lp = [lpips_lookup[(p, q)] for p in precisions for q in providers]
+        lp_min, lp_max = min(all_lp), max(all_lp)
+        margin = (lp_max - lp_min) * 0.18 + 0.005
+        ax_lpips.set_ylim(lp_min - margin, lp_max + margin)
+        ax_lpips.set_xticks(x)
+        ax_lpips.set_xticklabels(provider_labels, fontsize=11)
+        ax_lpips.set_ylabel("LPIPS (SqueezeNet, perceptual distance)  ↓", fontsize=11.5)
+        ax_lpips.set_title(
+            "Perceptual — LPIPS by precision × provider  "
+            f"(provider-invariant: cross-EP spread ≤ {lpips_spread_max:.4f}; lower = more perceptually similar to GT)",
+            fontsize=12, fontweight="bold", pad=8,
+        )
+        ax_lpips.legend(
+            title="Precision", loc="upper left",
+            fontsize=9.5, title_fontsize=10.5, framealpha=0.95,
+        )
+        ax_lpips.grid(axis="y", alpha=0.3)
+
+    # === Panel 3: Latency — 9 grouped bars ===
     for i, prec in enumerate(precisions):
         lat_vals = [lat_lookup[(prec, prov)][0] for prov in providers]
         lat_stds = [lat_lookup[(prec, prov)][1] for prov in providers]
