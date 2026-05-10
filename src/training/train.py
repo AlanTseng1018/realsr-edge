@@ -64,10 +64,12 @@ Notes on QAT (Quantization-Aware Training)
   need QAT. Caveat and full reasoning in
   ``learning/when_to_use_qat.md``.
 
-Notes on memory (RTX 3060 6GB)
-------------------------------
-* Default batch=16, patch=96 (LR) / 192 (HR), n_feats=64 fits in ~3-4 GB.
-* If OOM: drop batch to 8 or patch to 64.
+Notes on memory (RTX 3090 24GB)
+-------------------------------
+* Default batch=16, patch=96 (LR) / 192 (HR), n_feats=64 uses ~3-4 GB,
+  well within 24 GB; the config is sized for portability to smaller cards
+  (e.g. 6-8 GB laptop / consumer GPUs), not to maximize 3090 throughput.
+* If OOM on a smaller card: drop batch to 8 or patch to 64.
 * QAT adds modest memory overhead from the fake-quant wrappers (extra
   buffers per layer for calibration stats + the STE backward graph);
   same OOM mitigations apply.

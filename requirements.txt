@@ -1,4 +1,6 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
+
+# Core training
 torch
 torchvision
 numpy
@@ -17,12 +19,9 @@ onnxconverter-common
 # without this, ORT silently falls back to CUDA EP at session creation.
 tensorrt-cu12
 
-# torch.compile on Windows needs Triton, which has no official Windows wheels.
-triton-windows<3.3 ; sys_platform == "win32"
-
-# Deployment / quantization runtime
-onnx
-onnxruntime-gpu
+# Perceptual metric (LPIPS feature distance) for the PSNR/SSIM/LPIPS
+# triangulation in the quantization shootout + per-image heatmaps.
+lpips
 
 # torch.compile on Windows needs Triton, which has no official Windows wheels.
 # triton-windows is a community-maintained build pinned for compat with PyTorch 2.6.
