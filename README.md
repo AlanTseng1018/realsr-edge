@@ -11,6 +11,8 @@ The project is structured as four investigation tracks layered on a single train
 
 This README currently covers section 1; subsequent sections will be added incrementally.
 
+> **Methodology note — AI-assisted development.** Implementation was done in collaboration with an AI coding assistant (Claude Code). The human author (Cheng Wei Tseng) owns the engineering judgments: scope cut and KPI selection, choice of recipes / detectors and what *not* to include, result verification against measured numbers, and the explicit *verified / hypothesized / cannot-verify / out-of-scope* boundary that runs through every finding. AI assistance accelerated typing and boilerplate, not the decisions above.
+
 ---
 
 ## 1. Model Training
