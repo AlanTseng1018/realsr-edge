@@ -9,7 +9,7 @@ The project is structured as four investigation tracks layered on a single train
 3. **Cross-stack deployment** — ONNX × 3 EP (CPU / CUDA / TensorRT), Native TRT, C++ ORT runner, roofline analysis
 4. **Findings & scope** — QDQ paradox, perceptual triangulation (PSNR/SSIM/LPIPS), HW utilization, honest verified / hypothesized / cannot-verify boundary
 
-This README currently covers section 1; subsequent sections will be added incrementally.
+This README currently covers sections 1 and 2; sections 3 and 4 will be added incrementally.
 
 ---
 
@@ -98,7 +98,7 @@ The output of this section is **not** "I implemented N quantization methods." It
 - **Reasoning** — the trade-off behind each choice and the measured number that supports it
 - **Boundary** — what the decision *doesn't* cover (verified vs hypothesized vs out-of-scope)
 
-Four orthogonal recipes are explored, each backed by a measurement artifact in `results/`:
+Five orthogonal recipes are explored, each backed by a measurement artifact in `results/`:
 
 | § | Recipe axis | Question it answers |
 |---|---|---|
@@ -123,7 +123,7 @@ A single table puts every precision option on the same val set, with the same me
 | FP32 (QAT weights, fake-quant off) | **27.501** | **+0.063** | 0.7932 | 0.2050 | 5.23 |
 | INT8 QAT (fake-quant) | 27.446 | **+0.007** | 0.7893 | 0.1900 | 1.31 |
 
-Two non-obvious rows: the **FP32 (QAT weights)** row isolates the *training-time* effect of QAT (better than the original FP32 baseline because 20 extra fine-tune epochs help), and **INT8 QAT** lands within noise of the original FP32 baseline at ¼ the size. The LPIPS column drops the cleanest under INT8 — interpreted with magnitude check in [learning/int8_perception_finding.md](learning/int8_perception_finding.md).
+Two non-obvious rows: the **FP32 (QAT weights)** row isolates the *training-time* effect of QAT (better than the original FP32 baseline by +0.063 dB — most likely STE acting as a regularizer rather than pure extra training, since the FP32 model is already near-converged; see §2.3), and **INT8 QAT** lands within noise of the original FP32 baseline at ¼ the size. The LPIPS column drops the cleanest under INT8 — interpreted with magnitude check in [learning/int8_perception_finding.md](learning/int8_perception_finding.md).
 
 **How to reproduce**
 
@@ -154,10 +154,10 @@ Recipe (implemented in [src/training/train.py:404-551](src/training/train.py#L40
 4. Switch to **QAT mode** (fake-quant on, weight gradients via Straight-Through Estimator) and fine-tune.
 5. Default schedule — **20 epochs, lr = 1e-5** (10× smaller than base), CosineAnnealingLR. Validation runs in *quantize mode* (clean fake-INT8 measurement, no STE noise leaking into PSNR).
 
-The conservative LR is intentional: the model is already converged, the fine-tune only needs to absorb quantization noise. Going to 50 epochs / 5e-5 rarely helps in our experiments and risks regression — full reasoning in [learning/when_to_use_qat.md](learning/when_to_use_qat.md).
+The conservative LR is intentional: the FP32 model is essentially converged, so the fine-tune's main job is to absorb quantization noise rather than continue learning the SR task (the +0.063 dB the §2.2 FP32-eval row picks up is best read as STE-regularization, not pure extra training). Going to 50 epochs / 5e-5 rarely helps in our experiments and risks regression — full reasoning in [learning/when_to_use_qat.md](learning/when_to_use_qat.md).
 
 ![QAT fine-tuning curves](results/runs/20260430_223739_ep0_b16_scale2_realistic_qat/curves.png)
-*20-epoch QAT fine-tune at lr=1e-5 evaluated in fake-INT8 mode. Validation PSNR climbs ~0.04 dB from the calibration starting point to **27.446 dB** (best ep 19); training L1 loss is noisy but stays in a tight band — no regression, supporting the conservative schedule over 50ep / 5e-5.*
+*20-epoch QAT fine-tune at lr=1e-5, evaluated in fake-INT8 mode. Validation PSNR trends upward from epoch 1 (27.418 dB) to best at ep 19 (**27.446 dB**) — about +0.03 dB across the fine-tune phase, and +0.088 dB total over the PTQ-only INT8 baseline (27.358, §2.2). Training L1 loss is noisy but stays in a tight band — no regression, supporting the conservative schedule over 50ep / 5e-5.*
 
 **How to reproduce**
 
@@ -206,7 +206,7 @@ Each of the 36 Conv2d layers is INT8-quantized in isolation while the rest stay 
 The top of the ranking is concentrated and intuitive: pixel-shuffle / final-projection / first-conv layers hurt the most.
 
 ![per-layer isolated INT8 sensitivity](results/layer_analysis/edsr_200ep/sensitivity.png)
-*All 36 Conv2d layers ranked by output-fidelity PSNR (FP32 output vs single-layer-INT8 output). Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.6.*
+*All 36 Conv2d layers ranked by **output-fidelity PSNR** — FP32 output vs single-layer-INT8 output. Note this is an internal-fidelity metric (large dynamic range, ~48–78 dB) and is distinct from the end-to-end SR PSNR drop in the table below (small dynamic range, < 0.03 dB); the rankings agree. Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.6.*
 
 | Rank | Layer | PSNR drop (dB) when this layer is INT8 alone |
 |---|---|---|
@@ -270,7 +270,7 @@ python -m src.deployment.compare_mixed_precision \
 | Question | Recipe (this repo's first answer) | Reasoning anchor |
 |---|---|---|
 | Default INT8 calibration? | `max-abs` | 2.4 — spread vs percentile-99.99 < 0.01 dB |
-| First mixed-precision target? | top-2 FP32: `tail` + `upsampler.0` | 2.5/2.6 — 73% of the FP32-vs-INT8 PSNR gap recovered |
+| First mixed-precision target? | top-2 FP32: `tail` + `upsampler.0` | 2.5/2.6 — 58% of the FP32-vs-INT8 PSNR gap recovered at minimum FP32 footprint; escalate to top-4 (86%) if vendor needs more |
 | When to invest in QAT? | If PTQ drop > 0.2 dB *or* vendor has no FP32 fallback | 2.6 — QAT all-INT8 already exceeds original FP32 baseline |
 | Acceptable Native FP16 / BF16? | Both: FP16 is identical, BF16 within 0.02 dB | 2.2 — keep as ½-size fallbacks |
 
