@@ -112,9 +112,9 @@ Four orthogonal recipes are explored, each backed by a measurement artifact in `
 
 A single table puts every precision option on the same val set, with the same metric implementations, so rows are directly comparable.
 
-**Result** (on DIV2K val, 100 images, EDSR-baseline 200ep)
+**Result** (on DIV2K val, 100 images, EDSR-baseline 200ep). Header arrows: **↑** higher is better, **↓** lower is better. ΔPSNR is signed vs FP32 baseline (positive = beats baseline). PSNR/SSIM measure fidelity to ground truth; LPIPS measures perceptual distance — they don't always agree (see [learning/int8_perception_finding.md](learning/int8_perception_finding.md) for the caveat).
 
-| Format | PSNR (dB) | ΔPSNR | SSIM | LPIPS | Size (MB) |
+| Format | PSNR (dB) ↑ | ΔPSNR ↑ | SSIM ↑ | LPIPS ↓ | Size (MB) ↓ |
 |---|---|---|---|---|---|
 | FP32 (baseline) | 27.439 | — | 0.7907 | 0.2108 | 5.23 |
 | FP16 (autocast) | 27.438 | −0.001 | 0.7907 | 0.2108 | 2.61 |
