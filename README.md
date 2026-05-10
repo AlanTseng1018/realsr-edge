@@ -1,6 +1,6 @@
-# RealSR-Edge
+# RealSR-Quant
 
-A pre-handoff quantization analysis & optimization pipeline for super-resolution on edge AI accelerators. EDSR-baseline is used as the substrate; the deliverable is a decision package (recipes + reasoning + scope boundary) that lets a downstream NPU/SoC team adapt the work to their silicon, not a single tuned config.
+A pre-handoff quantization analysis & optimization pipeline for super-resolution. EDSR-baseline is used as the substrate; the deliverable is a decision package (recipes + reasoning + scope boundary) that lets a downstream NPU/SoC team adapt the work to their silicon, not a single tuned config. All measurements are on a workstation GPU (RTX 3090) and ONNX/TRT — real edge-device verification is explicitly out of scope and marked as such throughout.
 
 The project is structured as four investigation tracks layered on a single trained model:
 

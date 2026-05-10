@@ -1,4 +1,4 @@
-# RealSR-Edge Pipeline Anatomy — pre-handoff validation 各站清單
+# RealSR-Quant Pipeline Anatomy — pre-handoff validation 各站清單
 
 > **這個專案的 deliverable 是 pre-handoff validation pipeline,不是 SR model**。SR (EDSR-baseline) 是 stress-test 載體;pipeline 的目的是在模型交給 NPU vendor 前,系統性把可預期的 deploy-time failure mode 用 detector 全部攔下,讓 vendor 接過去**不需要打回來重訓**。
 >
@@ -255,4 +255,4 @@
 | **WHY**(minimize NPU vendor retrain probability) | 每站「攔到什麼 risk」欄位的累積效果 |
 | **HOW PROVEN**(findings as evidence) | QDQ paradox(站 5)/ perception-distortion(站 3e)/ Tensor Core 64% utilization(站 7)/ DLL 衝突(站 8) |
 
-面試時對方要你 navigate 哪一站,**這份文檔配 [project_thesis_realsredge memory](../../.claude/projects/c--Users-start-RealSR-Edge/memory/project_thesis_realsredge.md) 一起翻,1 秒就能定位**。
+面試時對方要你 navigate 哪一站,**這份文檔配 [project_thesis_realsredge memory](../../.claude/projects/c--Users-start-RealSR-Quant/memory/project_thesis_realsredge.md) 一起翻,1 秒就能定位**。

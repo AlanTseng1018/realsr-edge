@@ -1,4 +1,4 @@
-# RealSR-Edge — Pipeline Overview
+# RealSR-Quant — Pipeline Overview
 
 A project-specific snapshot of how the codebase is wired end-to-end:
 training data → trained model → quantization analysis → deployment
@@ -273,7 +273,7 @@ third option once installed):
 ## File map (where each output lives)
 
 ```
-RealSR-Edge/
+RealSR-Quant/
 ├── data/DIV2K/                                       (gitignored)
 ├── notebooks/
 │   ├── 01_degradation_demo.ipynb                     (Node 1)

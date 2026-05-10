@@ -1,4 +1,4 @@
-realsr-edge/                          ← 專案根目錄（GitHub repo）
+realsr-quant/                         ← 專案根目錄（GitHub repo）
 │
 ├── README.md                         ← ⭐【Day 1】專案門面，第一個被看到的東西
 ├── SPECIFICATION.md                  ← ⭐【Day 1】規格書（你之前產出的那份）

@@ -1,7 +1,7 @@
-# RealSR-Edge: Project Specification
+# RealSR-Quant: Project Specification
 
 **Document Version**: 1.0  
-**Last Updated**: 2026-04-26  
+**Last Updated**: 2026-04-26 (renamed from RealSR-Edge on 2026-05-10 to better match scope)  
 **Project Duration**: 3 weeks (2026-04-26 to 2026-05-17)  
 **Status**: In Progress  
 
@@ -11,13 +11,13 @@
 
 ### 0.1 Project Identity
 
-**Name**: RealSR-Edge  
-**Tagline**: Realistic Degradation-Aware Super-Resolution with Compiler-Optimized Edge Deployment  
-**Repository**: `realsr-edge`  
+**Name**: RealSR-Quant  
+**Tagline**: Pre-handoff quantization analysis & optimization pipeline for super-resolution.  
+**Repository**: `realsr-quant`  
 
 ### 0.2 One-Sentence Definition
 
-> A complete super-resolution pipeline targeting edge AI deployment, featuring realistic degradation-aware training, multi-format quantization analysis, and NN compiler acceleration—designed as a methodological prototype for TV SoC AI IP development.
+> A pre-handoff quantization analysis & optimization pipeline for super-resolution: PTQ / QAT / calibration / per-layer sensitivity / mixed-precision sweep on EDSR-baseline, with cross-stack ONNX × 3 EP + Native TRT + C++ measurement and explicit verified / hypothesized / cannot-verify scope boundary. Real edge-device verification is intentionally out of scope.
 
 ### 0.3 Strategic Objectives
 

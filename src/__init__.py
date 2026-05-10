@@ -1,1 +1,1 @@
-"""RealSR-Edge: Edge-deployable super-resolution package."""
+"""RealSR-Quant: pre-handoff quantization analysis pipeline for super-resolution."""
