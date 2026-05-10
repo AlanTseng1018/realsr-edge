@@ -11,8 +11,6 @@ The project is structured as four investigation tracks layered on a single train
 
 This README currently covers section 1; subsequent sections will be added incrementally.
 
-> **Methodology note — AI-assisted development.** Implementation was done in collaboration with an AI coding assistant (Claude Code). The human author (Cheng Wei Tseng) owns the engineering judgments: scope cut and KPI selection, choice of recipes / detectors and what *not* to include, result verification against measured numbers, and the explicit *verified / hypothesized / cannot-verify / out-of-scope* boundary that runs through every finding. AI assistance accelerated typing and boilerplate, not the decisions above.
-
 ---
 
 ## 1. Model Training
@@ -87,3 +85,9 @@ PSNR plateaus around epoch 150 with a long, low-amplitude tail to epoch 200; the
 | [docs/adr/004_loss_function_choice.md](docs/adr/004_loss_function_choice.md) | Loss-function ADR — why L1 over L2 / Charbonnier / perceptual |
 
 QAT fine-tuning is implemented in the same `train.py` (`--qat` flag, calibration → STE fine-tune → fake-INT8 best checkpoint) and is covered in section 2.
+
+---
+
+## On AI assistance
+
+I used an AI coding assistant (Claude Code) for implementation — typing, boilerplate, and refactoring. The engineering judgments are mine: scope cuts and KPI selection, choice of recipes / detectors and what *not* to include, verification against measured numbers, and the explicit *verified / hypothesized / cannot-verify / out-of-scope* boundary that runs through every finding.
