@@ -236,11 +236,11 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
                     f"{val:.4f}", ha="center", fontsize=8.5, color="#222",
                 )
 
-        # Y-range: tight around observed values to make Δ visible
+        # Y-range: leave extra room at the BOTTOM for the legend (which sits
+        # at lower-left so it doesn't clash with the FP32/FP16 bars at the top).
         all_lp = [lpips_lookup[(p, q)] for p in precisions for q in providers]
         lp_min, lp_max = min(all_lp), max(all_lp)
-        margin = (lp_max - lp_min) * 0.18 + 0.005
-        ax_lpips.set_ylim(lp_min - margin, lp_max + margin)
+        ax_lpips.set_ylim(lp_min - 0.022, lp_max + 0.005)
         ax_lpips.set_xticks(x)
         ax_lpips.set_xticklabels(provider_labels, fontsize=11)
         ax_lpips.set_ylabel("LPIPS (SqueezeNet, perceptual distance)  ↓", fontsize=11.5)
@@ -250,7 +250,7 @@ def make_precision_ep_breakdown(csv_path: Path, out_path: Path) -> None:
             fontsize=12, fontweight="bold", pad=8,
         )
         ax_lpips.legend(
-            title="Precision", loc="upper left",
+            title="Precision", loc="lower left",
             fontsize=9.5, title_fontsize=10.5, framealpha=0.95,
         )
         ax_lpips.grid(axis="y", alpha=0.3)
