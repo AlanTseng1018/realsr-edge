@@ -349,8 +349,8 @@ python -m src.deployment.benchmark_onnx \
 
 INT8 should be faster than FP16: fewer bits, smaller engine, dedicated INT8 tensor cores on Ampere. The 4.33 ms in §3.2 is anomalous. Root cause: `onnxruntime.quantization.quantize_static` produces QDQ ONNX with `INT32` bias `DequantizeLinear` nodes; TensorRT 10's ONNX parser rejects those, so ORT TRT EP cannot fuse the graph and falls back to a non-fused path (Q/DQ ops on CPU, conv on GPU FP32, with Memcpy nodes between). The "INT8 model" effectively runs as decorated FP32.
 
-![ORT × 3 EP INT8 paradox vs Native TRT rescue](results/qdq_paradox_chart.png)
-*FP32 (gray) vs INT8 (red/green) latency across four backends. **Red region (ORT × 3 EP)**: INT8 is 1.14×–1.32× *slower* than FP32 — the QDQ fusion failure. **Green region (Native TRT)**: INT8 is 0.56× FP32, i.e. 1.8× faster — the calibrator-based path bypasses QDQ entirely.*
+![ORT × 3 EP INT8 paradox vs Native TRT rescue, with FP16 reference](results/qdq_paradox_chart.png)
+*FP32 (grey) / FP16 (orange) / INT8 (red where slower than FP32 = paradox, green where faster = bypass) across four backends; log Y-scale. **Red region (ORT × 3 EP)**: INT8 is 1.14×–1.32× *slower* than FP32 — the QDQ fusion failure. **Green region (Native TRT)**: INT8 is 0.56× FP32 (1.8× faster) — the calibrator path bypasses QDQ entirely. **FP16 wins on every GPU backend** (including Native TRT, where 1.50 ms beats INT8's 1.93 ms); ★ marks the absolute optimum (FP16 / ORT TRT EP at 1.28 ms). The "INT8 rescued but FP16 still wins on consumer Ampere" reading is the §3.4 roofline conclusion visualized — see §3.4 for the tensor-core utilization mechanism.*
 
 **Native TRT rescue path** — bypass QDQ via the TensorRT Python API + `IInt8EntropyCalibrator2` on 64 val patches:
 
