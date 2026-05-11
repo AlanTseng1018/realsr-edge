@@ -78,7 +78,17 @@ def main() -> None:
     ax.set_yscale("log")
     ax.set_ylim(1, 100)
 
-    # Annotate INT8 bars with ratio + arrow direction (the paradox story)
+    # Numerical labels on each bar (consistent across FP32 / FP16 / INT8)
+    for i in range(len(backends)):
+        ax.text(x[i] - width, fp32[i] * 1.06, f"{fp32[i]:.2f}",
+                ha="center", fontsize=7.5, color="#3a4654")
+        ax.text(x[i], fp16[i] * 1.06, f"{fp16[i]:.2f}",
+                ha="center", fontsize=7.5, color="#7a4310")
+        int8_color = "#a83820" if int8_ratios[i] > 1 else "#1d6535"
+        ax.text(x[i] + width, int8[i] * 1.06, f"{int8[i]:.2f}",
+                ha="center", fontsize=7.5, color=int8_color)
+
+    # Ratio annotation above the INT8 number (the paradox / bypass story)
     for i, (t, r) in enumerate(zip(int8, int8_ratios)):
         if r > 1:
             label = f"INT8 = {r:.2f}× FP32 ↑ slower"
@@ -89,17 +99,10 @@ def main() -> None:
         ax.annotate(
             label,
             xy=(x[i] + width, t),
-            xytext=(0, 6),
+            xytext=(0, 22),  # offset above the number label
             textcoords="offset points",
             ha="center", fontsize=8.5, color=color, weight="bold",
         )
-
-    # Numerical labels on FP32 / FP16 bars
-    for i in range(len(backends)):
-        ax.text(x[i] - width, fp32[i] * 1.06, f"{fp32[i]:.2f}",
-                ha="center", fontsize=7.5, color="#3a4654")
-        ax.text(x[i], fp16[i] * 1.06, f"{fp16[i]:.2f}",
-                ha="center", fontsize=7.5, color="#7a4310")
 
     # Star-mark the absolute optimum (FP16 / ORT TRT EP at 1.28 ms)
     # Placed above the FP16 bar's numerical label so it doesn't clip on log scale.
