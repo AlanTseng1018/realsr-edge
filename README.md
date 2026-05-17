@@ -328,6 +328,15 @@ The same mechanism is what makes GAN-based SR (ESRGAN, Real-ESRGAN, etc.) score 
 
 **Vendor implication** — for TV-product use cases where perceived sharpness matters more than pixel fidelity (common — viewers don't have a reference frame to compare against), **INT8 deploy is not a quality compromise; it can actively improve perceived quality**. The flip side: PSNR-anchored vendor acceptance criteria can *over-penalize* INT8 builds whose perceptual quality is fine. Both metrics should be on the handoff scorecard.
 
+**Where the quant-induced perceptual delta lands (LPIPS spatial heatmap)**
+
+The aggregate LPIPS gain (-0.027) is one number; the spatial map decomposes it into a *where*. The same val image 0879 is run through both FP32 and INT8, then a spatial LPIPS is computed per-patch on the SqueezeNet feature stack and overlaid on the INT8 output.
+
+![spatial LPIPS heatmap on 0879](results/quantization/200ep_with_report/lpips_heatmaps/heatmap_0879.png)
+*Cathedral val image, 3-panel: GT HR | INT8 SR | spatial LPIPS heatmap (INT8-vs-FP32, mean 0.0097). The heat (pink/red) localizes in **smooth regions** — the sky behind the dome and the broad facade walls — not on architectural detail. This is the textbook banding/posterization signature of INT8: smooth gradients are where 8-bit quantization granularity is most visible. The dome ornament and arcade detail barely move, confirming the **aggregate "INT8 wins on LPIPS" finding is not driven by a single hot spot** — it is a small uniform shift away from over-smooth FP32 toward natural-looking INT8 noise, with the residual change concentrated where banding is expected.*
+
+Implication: a smooth-region-aware mitigation (sky-aware mixed precision, output dithering, or post-processing) could squeeze more quality from the deploy. The per-image distribution in `lpips_heatmaps/distribution.png` shows all 100 val images cluster around a small negative LPIPS rise — no "catastrophic on smooth-heavy frames" tail, consistent with the spatial pattern being structural rather than image-dependent.
+
 **Cross-check: is INT8 hiding a structural failure that LPIPS misses?**
 
 LPIPS has a documented blind spot — it measures feature-space similarity (VGG / SqueezeNet) and is insensitive to geometric distortion that does not alter texture statistics. A frame whose window frames are subtly bent or whose roofline is slanted can register as perceptually identical to the GT under LPIPS, because the deep features still recognize "window" and "roof". For a TV upscaling deploy decision, you cannot accept "INT8 wins on LPIPS" without checking the orthogonal direction: does INT8 quietly introduce structural distortion that LPIPS would miss?
