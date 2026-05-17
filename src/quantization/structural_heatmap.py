@@ -56,6 +56,7 @@ from src.data.dataset import SRDataset
 from src.data.degradation import RealisticDegradation
 from src.models.edsr import EDSR
 from src.quantization.analyze import calibrate_int8
+from src.quantization._onnx_inference import OnnxSRRunner
 from src.quantization.fake_quant import (
     CalibratingConv2d,
     set_all_modes,
@@ -254,9 +255,9 @@ def overlay_on(
 
 @torch.no_grad()
 def render_structural_pack(
-    fp32_model: nn.Module,
-    quant_model: nn.Module,
-    quant_wrappers: dict[str, CalibratingConv2d],
+    fp32_model: nn.Module | None,
+    quant_model: nn.Module | None,
+    quant_wrappers: dict[str, CalibratingConv2d] | None,
     target_path: Path,
     target_idx: int,
     scale: int,
@@ -264,8 +265,19 @@ def render_structural_pack(
     crop_hr: int,
     edge_percentile: float,
     blur_sigma: float,
+    onnx_runner: OnnxSRRunner | None = None,
 ) -> dict:
-    """FP32+INT8 inference on centre-crop of target, plus the three heatmaps."""
+    """FP32+INT8 inference on centre-crop of target, plus the three heatmaps.
+
+    Inference backend is selected by ``onnx_runner``:
+        * ``None``  -> Stage 2 mode: PyTorch fake-quant via fp32_model /
+                       quant_model / quant_wrappers (must all be provided).
+        * provided -> Stage 3 mode: real ONNX inference; the PyTorch model
+                       args are unused and may be passed as ``None``.
+
+    Returned pack dict shape is identical in both modes, so the same
+    heatmap computation and figure layout apply downstream.
+    """
     hr_full = cv2.imread(str(target_path))
     if hr_full is None:
         raise RuntimeError(f"cv2 failed to read {target_path}")
@@ -283,14 +295,20 @@ def render_structural_pack(
     lr = _make_realistic_lr(hr, scale=scale, seed=target_idx, deg=deg)
     lr_t = _to_chw(lr).unsqueeze(0).to(device)
 
-    sr_fp32 = fp32_model(lr_t).clamp(0.0, 1.0).float()
+    if onnx_runner is not None:
+        fp32_np = onnx_runner.run_fp32(lr_t)[0]   # (3, H, W)
+        int8_np = onnx_runner.run_int8(lr_t)[0]
+        fp32_rgb = (np.transpose(fp32_np, (1, 2, 0)) * 255).astype(np.uint8)
+        int8_rgb = (np.transpose(int8_np, (1, 2, 0)) * 255).astype(np.uint8)
+    else:
+        sr_fp32 = fp32_model(lr_t).clamp(0.0, 1.0).float()
 
-    set_all_modes(quant_wrappers, "quantize")
-    sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
-    set_all_modes(quant_wrappers, "fp32")
+        set_all_modes(quant_wrappers, "quantize")
+        sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
+        set_all_modes(quant_wrappers, "fp32")
 
-    fp32_rgb = (sr_fp32.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-    int8_rgb = (sr_int8.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        fp32_rgb = (sr_fp32.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        int8_rgb = (sr_int8.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
 
     hm_gt_fp32, em_gf, dd_gf, mean_gf, ef_gf = compute_gradient_orientation_heatmap(
         hr, fp32_rgb, edge_percentile=edge_percentile, blur_sigma=blur_sigma,
@@ -416,21 +434,23 @@ def save_nine_panel(
 
 @torch.no_grad()
 def scan_val_set(
-    quant_model: nn.Module,
-    quant_wrappers: dict[str, CalibratingConv2d],
+    quant_model: nn.Module | None,
+    quant_wrappers: dict[str, CalibratingConv2d] | None,
     val_set: SRDataset,
     scale: int,
     device: torch.device,
     crop_hr: int,
     edge_percentile: float,
     blur_sigma: float,
+    onnx_runner: OnnxSRRunner | None = None,
 ) -> list[dict]:
     """For every val image: compute GT-vs-INT8 mean angular delta over edges.
 
-    Only INT8 path is run (FP32 is approximately equal as we already showed),
-    halving the inference budget. Returns a list of dicts sorted by mean
-    angular delta descending -- top entries are the most structurally
-    distorted under deployed INT8 inference.
+    Backend selected by ``onnx_runner`` (same convention as
+    :func:`render_structural_pack`). Only INT8 path is run (FP32 is approximately
+    equal as we already showed), halving the inference budget. Returns a list
+    of dicts sorted by mean angular delta descending -- top entries are the
+    most structurally distorted under deployed INT8 inference.
     """
     rows: list[dict] = []
     n = len(val_set.hr_paths)
@@ -455,10 +475,14 @@ def scan_val_set(
         lr = _make_realistic_lr(hr, scale=scale, seed=idx, deg=deg)
         lr_t = _to_chw(lr).unsqueeze(0).to(device)
 
-        set_all_modes(quant_wrappers, "quantize")
-        sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
-        set_all_modes(quant_wrappers, "fp32")
-        int8_rgb = (sr_int8.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        if onnx_runner is not None:
+            int8_np = onnx_runner.run_int8(lr_t)[0]
+            int8_rgb = (np.transpose(int8_np, (1, 2, 0)) * 255).astype(np.uint8)
+        else:
+            set_all_modes(quant_wrappers, "quantize")
+            sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
+            set_all_modes(quant_wrappers, "fp32")
+            int8_rgb = (sr_int8.squeeze(0).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
 
         _, _, _, mean_deg, edge_frac = compute_gradient_orientation_heatmap(
             hr, int8_rgb, edge_percentile=edge_percentile, blur_sigma=blur_sigma,
@@ -491,7 +515,15 @@ def save_scan_csv(rows: list[dict], out_path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Structural distortion heatmap (gradient orientation)")
-    p.add_argument("--checkpoint", type=str, required=True)
+    p.add_argument("--source", type=str, default="pytorch", choices=["pytorch", "onnx"],
+                   help="Inference backend. 'pytorch' = Stage-2 fake-quant via best.pt; "
+                        "'onnx' = Stage-3 deployment-check via exported ONNX files.")
+    p.add_argument("--checkpoint", type=str,
+                   help="PyTorch best.pt (required for --source pytorch)")
+    p.add_argument("--fp32-onnx", type=str,
+                   help="FP32 ONNX path (required for --source onnx)")
+    p.add_argument("--int8-onnx", type=str,
+                   help="INT8 ONNX path (required for --source onnx)")
     p.add_argument("--data-root", type=str, default="data/DIV2K")
     p.add_argument("--val-dir", type=str, default="DIV2K_valid_HR")
     p.add_argument("--output-dir", type=str, required=True)
@@ -516,7 +548,13 @@ def parse_args() -> argparse.Namespace:
                    help="Loop all val images, rank by structural distortion, save CSV.")
     p.add_argument("--scan-top-k", type=int, default=15,
                    help="Print top-K entries to stdout after scan.")
-    return p.parse_args()
+    args = p.parse_args()
+    # Source-specific arg validation -- cleaner here than via mutex argparse groups.
+    if args.source == "pytorch" and not args.checkpoint:
+        p.error("--checkpoint is required when --source=pytorch")
+    if args.source == "onnx" and (not args.fp32_onnx or not args.int8_onnx):
+        p.error("--fp32-onnx and --int8-onnx are required when --source=onnx")
+    return args
 
 
 def main() -> None:
@@ -528,7 +566,12 @@ def main() -> None:
     print("=" * 60)
     print("Structural distortion heatmap (gradient orientation)")
     print("=" * 60)
-    print(f"  checkpoint   : {args.checkpoint}")
+    print(f"  source       : {args.source}")
+    if args.source == "pytorch":
+        print(f"  checkpoint   : {args.checkpoint}")
+    else:
+        print(f"  fp32 onnx    : {args.fp32_onnx}")
+        print(f"  int8 onnx    : {args.int8_onnx}")
     print(f"  device       : {device}")
     print(f"  output       : {output_dir}")
     print(f"  target image : {args.target_image}")
@@ -543,35 +586,51 @@ def main() -> None:
         degradation="realistic",
         is_train=False,
     )
-    calib_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers,
-                              pin_memory=(device.type == "cuda"))
     print(f"  val: {len(val_set)} HR images")
 
-    def build() -> nn.Module:
-        m = EDSR(scale_factor=args.scale, n_resblocks=args.n_resblocks,
-                 n_feats=args.n_feats)
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        m.load_state_dict(ckpt["model"])
-        return m
+    fp32_model: nn.Module | None = None
+    quant_model: nn.Module | None = None
+    wrappers: dict[str, CalibratingConv2d] | None = None
+    onnx_runner: OnnxSRRunner | None = None
 
-    fp32_model = build().to(device).eval()
-    quant_model = build().to(device).eval()
-    wrappers = wrap_convs(quant_model)
+    if args.source == "pytorch":
+        calib_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=args.num_workers,
+                                  pin_memory=(device.type == "cuda"))
 
-    print("Calibrating INT8 ...")
-    calibrate_int8(quant_model, wrappers, calib_loader, device,
-                   n_batches=args.calib_batches)
-    print()
+        def build() -> nn.Module:
+            m = EDSR(scale_factor=args.scale, n_resblocks=args.n_resblocks,
+                     n_feats=args.n_feats)
+            ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+            m.load_state_dict(ckpt["model"])
+            return m
+
+        fp32_model = build().to(device).eval()
+        quant_model = build().to(device).eval()
+        wrappers = wrap_convs(quant_model)
+
+        print("Calibrating INT8 ...")
+        calibrate_int8(quant_model, wrappers, calib_loader, device,
+                       n_batches=args.calib_batches)
+        print()
+    else:
+        # ONNX deployment-side: INT8 ONNX was calibrated at export time
+        # (ORT quantize_static, MinMax) -- no runtime calibration here.
+        onnx_runner = OnnxSRRunner(Path(args.fp32_onnx), Path(args.int8_onnx))
+        print(f"  ONNX runner: {onnx_runner.describe()}")
+        print()
+
+    # Output suffix so PyTorch (Stage 2) and ONNX (Stage 3) artefacts coexist.
+    src_suffix = "_onnx" if args.source == "onnx" else ""
 
     # --- Scan mode: rank all val images by structural distortion, then exit ---
     if args.scan:
         rows = scan_val_set(
             quant_model, wrappers, val_set, scale=args.scale, device=device,
             crop_hr=args.heatmap_crop_hr, edge_percentile=args.edge_percentile,
-            blur_sigma=args.blur_sigma,
+            blur_sigma=args.blur_sigma, onnx_runner=onnx_runner,
         )
-        csv_path = output_dir / "scan_ranking.csv"
+        csv_path = output_dir / f"scan_ranking{src_suffix}.csv"
         save_scan_csv(rows, csv_path)
         print()
         print(f"Top {args.scan_top_k} most structurally distorted (GT-vs-INT8):")
@@ -599,6 +658,7 @@ def main() -> None:
         target_path=target_path, target_idx=target_idx,
         scale=args.scale, device=device, crop_hr=args.heatmap_crop_hr,
         edge_percentile=args.edge_percentile, blur_sigma=args.blur_sigma,
+        onnx_runner=onnx_runner,
     )
     print(f"  edge fractions (sanity, ~{100 - args.edge_percentile:.0f}% expected):")
     print(f"    GT-vs-FP32 : {pack['edge_frac_gt_vs_fp32']*100:.1f}%")
@@ -609,8 +669,8 @@ def main() -> None:
     print(f"    GT-vs-INT8 : {pack['mean_gt_vs_int8_deg']:.2f}°")
     print(f"    FP32-vs-INT8: {pack['mean_fp32_vs_int8_deg']:.2f}°")
 
-    out_png = output_dir / f"structural_heatmap_{Path(args.target_image).stem}.png"
-    save_nine_panel(out_png, pack, args.target_image)
+    out_png = output_dir / f"structural_heatmap_{Path(args.target_image).stem}{src_suffix}.png"
+    save_nine_panel(out_png, pack, f"{args.target_image} [{args.source}]")
     print(f"  wrote {out_png}")
     print()
     print("Done.")

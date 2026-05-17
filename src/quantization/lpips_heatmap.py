@@ -46,6 +46,7 @@ from torch.utils.data import DataLoader
 from src.data.dataset import SRDataset
 from src.data.degradation import RealisticDegradation
 from src.models.edsr import EDSR
+from src.quantization._onnx_inference import OnnxSRRunner
 from src.quantization.analyze import calibrate_int8
 from src.quantization.fake_quant import (
     CalibratingConv2d,
@@ -95,18 +96,22 @@ def _make_realistic_lr(
 
 @torch.no_grad()
 def per_image_lpips(
-    fp32_model: nn.Module,
-    quant_model: nn.Module,
-    quant_wrappers: dict[str, CalibratingConv2d],
+    fp32_model: nn.Module | None,
+    quant_model: nn.Module | None,
+    quant_wrappers: dict[str, CalibratingConv2d] | None,
     val_set: SRDataset,
     device: torch.device,
     lpips_model: nn.Module,
+    onnx_runner: OnnxSRRunner | None = None,
 ) -> list[dict]:
     """Per-image LPIPS for FP32 SR vs GT and INT8 SR vs GT.
 
     Iterates the val set one image at a time (batch=1) so we get one
     LPIPS scalar per image, suitable for distribution analysis. SSIM is
     NOT recomputed here -- it's already in the aggregate shootout.
+
+    Backend selected by ``onnx_runner`` (same convention as
+    :func:`make_heatmap`).
     """
     rows: list[dict] = []
     for idx in range(len(val_set)):
@@ -114,18 +119,20 @@ def per_image_lpips(
         lr = lr.unsqueeze(0).to(device)
         hr = hr.unsqueeze(0).to(device)
 
-        # FP32
-        sr_fp32 = fp32_model(lr).clamp(0.0, 1.0).float()
-        d_fp32 = lpips_model(sr_fp32 * 2 - 1, hr * 2 - 1).flatten().item()
+        if onnx_runner is not None:
+            sr_fp32 = torch.from_numpy(onnx_runner.run_fp32(lr)).to(device).float()
+            sr_int8 = torch.from_numpy(onnx_runner.run_int8(lr)).to(device).float()
+        else:
+            sr_fp32 = fp32_model(lr).clamp(0.0, 1.0).float()
+            set_all_modes(quant_wrappers, "quantize")
+            sr_int8 = quant_model(lr).clamp(0.0, 1.0).float()
+            set_all_modes(quant_wrappers, "fp32")
 
-        # INT8 fake-quant
-        set_all_modes(quant_wrappers, "quantize")
-        sr_int8 = quant_model(lr).clamp(0.0, 1.0).float()
+        d_fp32 = lpips_model(sr_fp32 * 2 - 1, hr * 2 - 1).flatten().item()
         d_int8 = lpips_model(sr_int8 * 2 - 1, hr * 2 - 1).flatten().item()
         # Also INT8-vs-FP32 distance: isolates the quantization-induced
         # perceptual delta from the underlying SR reconstruction error.
         d_q_only = lpips_model(sr_int8 * 2 - 1, sr_fp32 * 2 - 1).flatten().item()
-        set_all_modes(quant_wrappers, "fp32")
 
         name = val_set.hr_paths[idx % len(val_set.hr_paths)].name
         rows.append({
@@ -148,18 +155,24 @@ def per_image_lpips(
 
 @torch.no_grad()
 def make_heatmap(
-    fp32_model: nn.Module,
-    quant_model: nn.Module,
-    quant_wrappers: dict[str, CalibratingConv2d],
+    fp32_model: nn.Module | None,
+    quant_model: nn.Module | None,
+    quant_wrappers: dict[str, CalibratingConv2d] | None,
     target_path: Path,
     target_idx: int,
     scale: int,
     device: torch.device,
     lpips_spatial: nn.Module,
     crop_hr: int = 1024,
+    onnx_runner: OnnxSRRunner | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Run FP32 + INT8 inference on a center-crop of the target HR image,
     return (gt_hr_rgb, int8_sr_rgb, lpips_overlay_rgb, lpips_scalar).
+
+    Backend selected by ``onnx_runner``:
+        * ``None``  -> Stage 2 PyTorch fake-quant (fp32_model / quant_model /
+                       quant_wrappers must all be provided).
+        * provided -> Stage 3 ONNX inference; PyTorch model args unused.
 
     The crop is square ``crop_hr x crop_hr`` HR pixels (i.e. the LR side
     is ``crop_hr // scale``). Cropping caps GPU memory and keeps the
@@ -186,13 +199,20 @@ def make_heatmap(
     hr_t = _to_chw(hr).unsqueeze(0).to(device)
     lr_t = _to_chw(lr).unsqueeze(0).to(device)
 
-    # FP32 SR
-    sr_fp32 = fp32_model(lr_t).clamp(0.0, 1.0).float()
-
-    # INT8 SR
-    set_all_modes(quant_wrappers, "quantize")
-    sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
-    set_all_modes(quant_wrappers, "fp32")
+    if onnx_runner is not None:
+        # ONNX returns numpy (1, 3, sH, sW); lift to torch on `device` so the
+        # spatial LPIPS network (a torch module on `device`) can consume it.
+        fp32_np = onnx_runner.run_fp32(lr_t)
+        int8_np = onnx_runner.run_int8(lr_t)
+        sr_fp32 = torch.from_numpy(fp32_np).to(device).float()
+        sr_int8 = torch.from_numpy(int8_np).to(device).float()
+    else:
+        # FP32 SR (PyTorch)
+        sr_fp32 = fp32_model(lr_t).clamp(0.0, 1.0).float()
+        # INT8 SR (PyTorch fake-quant)
+        set_all_modes(quant_wrappers, "quantize")
+        sr_int8 = quant_model(lr_t).clamp(0.0, 1.0).float()
+        set_all_modes(quant_wrappers, "fp32")
 
     # Spatial LPIPS: INT8 SR vs FP32 SR (isolates quantization-induced delta)
     # Output shape: (1, 1, H', W') with H'/W' a downsampled spatial map.
@@ -282,7 +302,15 @@ def write_per_image_csv(out_path: Path, rows: list[dict]) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="LPIPS spatial + per-image analysis")
-    p.add_argument("--checkpoint", type=str, required=True)
+    p.add_argument("--source", type=str, default="pytorch", choices=["pytorch", "onnx"],
+                   help="Inference backend. 'pytorch' = Stage-2 fake-quant via best.pt; "
+                        "'onnx' = Stage-3 deployment-check via exported ONNX files.")
+    p.add_argument("--checkpoint", type=str,
+                   help="PyTorch best.pt (required for --source pytorch)")
+    p.add_argument("--fp32-onnx", type=str,
+                   help="FP32 ONNX path (required for --source onnx)")
+    p.add_argument("--int8-onnx", type=str,
+                   help="INT8 ONNX path (required for --source onnx)")
     p.add_argument("--data-root", type=str, default="data/DIV2K")
     p.add_argument("--val-dir", type=str, default="DIV2K_valid_HR")
     p.add_argument("--output-dir", type=str, required=True)
@@ -301,7 +329,12 @@ def parse_args() -> argparse.Namespace:
                    choices=["alex", "vgg", "squeeze"])
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.source == "pytorch" and not args.checkpoint:
+        p.error("--checkpoint is required when --source=pytorch")
+    if args.source == "onnx" and (not args.fp32_onnx or not args.int8_onnx):
+        p.error("--fp32-onnx and --int8-onnx are required when --source=onnx")
+    return args
 
 
 def main() -> None:
@@ -313,7 +346,12 @@ def main() -> None:
     print("=" * 60)
     print("LPIPS perceptual analysis")
     print("=" * 60)
-    print(f"  checkpoint   : {args.checkpoint}")
+    print(f"  source       : {args.source}")
+    if args.source == "pytorch":
+        print(f"  checkpoint   : {args.checkpoint}")
+    else:
+        print(f"  fp32 onnx    : {args.fp32_onnx}")
+        print(f"  int8 onnx    : {args.int8_onnx}")
     print(f"  device       : {device}")
     print(f"  output       : {output_dir}")
     print(f"  target image : {args.target_image}")
@@ -328,31 +366,37 @@ def main() -> None:
         degradation="realistic",
         is_train=False,
     )
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            num_workers=args.num_workers,
-                            pin_memory=(device.type == "cuda"))
-    calib_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers,
-                              pin_memory=(device.type == "cuda"))
     print(f"  val: {len(val_set)} HR images")
 
-    # --- Model x2 (FP32 baseline + INT8 fake-quant copy) ---
-    def build() -> nn.Module:
-        m = EDSR(scale_factor=args.scale, n_resblocks=args.n_resblocks,
-                 n_feats=args.n_feats)
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        m.load_state_dict(ckpt["model"])
-        return m
+    fp32_model: nn.Module | None = None
+    quant_model: nn.Module | None = None
+    wrappers: dict[str, CalibratingConv2d] | None = None
+    onnx_runner: OnnxSRRunner | None = None
 
-    fp32_model = build().to(device).eval()
-    quant_model = build().to(device).eval()
-    wrappers = wrap_convs(quant_model)
+    if args.source == "pytorch":
+        calib_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=args.num_workers,
+                                  pin_memory=(device.type == "cuda"))
 
-    # --- Calibration ---
-    print("Calibrating INT8 ...")
-    calibrate_int8(quant_model, wrappers, calib_loader, device,
-                   n_batches=args.calib_batches)
-    print()
+        def build() -> nn.Module:
+            m = EDSR(scale_factor=args.scale, n_resblocks=args.n_resblocks,
+                     n_feats=args.n_feats)
+            ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+            m.load_state_dict(ckpt["model"])
+            return m
+
+        fp32_model = build().to(device).eval()
+        quant_model = build().to(device).eval()
+        wrappers = wrap_convs(quant_model)
+
+        print("Calibrating INT8 ...")
+        calibrate_int8(quant_model, wrappers, calib_loader, device,
+                       n_batches=args.calib_batches)
+        print()
+    else:
+        onnx_runner = OnnxSRRunner(Path(args.fp32_onnx), Path(args.int8_onnx))
+        print(f"  ONNX runner: {onnx_runner.describe()}")
+        print()
 
     # --- LPIPS models (scalar + spatial) ---
     print(f"Loading LPIPS (net={args.lpips_net}) ...")
@@ -360,13 +404,17 @@ def main() -> None:
     lpips_spatial = _load_lpips(args.lpips_net, device, spatial=True)
     print()
 
+    # Output suffix so PyTorch (Stage 2) and ONNX (Stage 3) artefacts coexist.
+    src_suffix = "_onnx" if args.source == "onnx" else ""
+
     # --- Per-image LPIPS sweep ---
     print("Computing per-image LPIPS across val set ...")
     rows = per_image_lpips(
         fp32_model, quant_model, wrappers, val_set, device, lpips_scalar,
+        onnx_runner=onnx_runner,
     )
-    write_per_image_csv(output_dir / "per_image_lpips.csv", rows)
-    print(f"  wrote {output_dir / 'per_image_lpips.csv'}")
+    write_per_image_csv(output_dir / f"per_image_lpips{src_suffix}.csv", rows)
+    print(f"  wrote {output_dir / f'per_image_lpips{src_suffix}.csv'}")
 
     rises = np.array([r["lpips_rise"] for r in rows])
     print(f"  rise: mean={rises.mean():+.4f}  median={np.median(rises):+.4f}  "
@@ -376,9 +424,9 @@ def main() -> None:
     # --- Distribution histogram ---
     print("Saving distribution histogram ...")
     save_distribution_png(
-        output_dir / "distribution.png", rows, args.target_image,
+        output_dir / f"distribution{src_suffix}.png", rows, args.target_image,
     )
-    print(f"  wrote {output_dir / 'distribution.png'}")
+    print(f"  wrote {output_dir / f'distribution{src_suffix}.png'}")
     print()
 
     # --- Heatmap on target image ---
@@ -394,12 +442,12 @@ def main() -> None:
         fp32_model, quant_model, wrappers,
         target_path=target_path, target_idx=target_idx,
         scale=args.scale, device=device, lpips_spatial=lpips_spatial,
-        crop_hr=args.heatmap_crop_hr,
+        crop_hr=args.heatmap_crop_hr, onnx_runner=onnx_runner,
     )
-    out_png = output_dir / f"heatmap_{Path(args.target_image).stem}.png"
+    out_png = output_dir / f"heatmap_{Path(args.target_image).stem}{src_suffix}.png"
     save_heatmap_png(
         out_png, gt_hr, int8_sr, overlay,
-        title=f"Quantization-induced perceptual gap on {args.target_image}",
+        title=f"Quantization-induced perceptual gap on {args.target_image} [{args.source}]",
         lpips_scalar=lp,
     )
     print(f"  wrote {out_png}  (mean spatial LPIPS = {lp:.4f})")
