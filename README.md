@@ -328,6 +328,23 @@ The same mechanism is what makes GAN-based SR (ESRGAN, Real-ESRGAN, etc.) score 
 
 **Vendor implication** — for TV-product use cases where perceived sharpness matters more than pixel fidelity (common — viewers don't have a reference frame to compare against), **INT8 deploy is not a quality compromise; it can actively improve perceived quality**. The flip side: PSNR-anchored vendor acceptance criteria can *over-penalize* INT8 builds whose perceptual quality is fine. Both metrics should be on the handoff scorecard.
 
+**Cross-check: is INT8 hiding a structural failure that LPIPS misses?**
+
+LPIPS has a documented blind spot — it measures feature-space similarity (VGG / SqueezeNet) and is insensitive to geometric distortion that does not alter texture statistics. A frame whose window frames are subtly bent or whose roofline is slanted can register as perceptually identical to the GT under LPIPS, because the deep features still recognize "window" and "roof". For a TV upscaling deploy decision, you cannot accept "INT8 wins on LPIPS" without checking the orthogonal direction: does INT8 quietly introduce structural distortion that LPIPS would miss?
+
+A complementary **gradient orientation heatmap** measures per-pixel edge-orientation difference directly. Sobel gradients on GT and SR luminance → undirected angular delta per pixel → masked to high-edge-density regions → colormap saturated at 30° (the meaningful range). The 9-panel layout below decomposes into source images (row 1), full-image structural heatmaps for three pairs (row 2), and an auto-zoom on the most distorted region scored by *mean Δ × edge density* (row 3).
+
+![structural distortion heatmap on 0879](results/quantization/200ep_with_report/structural_heatmaps/structural_heatmap_0879.png)
+*Christ the Saviour cathedral (val image 0879), 1024px center crop. **Row 2 left/middle** (GT-vs-FP32 / GT-vs-INT8): both panels show **10.7° mean angular delta** concentrated on architectural lines — arches, columns, dome edges. The SR model itself fails to preserve geometric structure by that magnitude, regardless of precision. **Row 2 right** (FP32-vs-INT8): mean **0.6°** — a near-uniform pale-yellow wash, confirming **quantization adds essentially zero structural error** on top of what FP32 already produces. **Row 3** auto-zooms on the most structurally distorted 256px region of GT-vs-INT8 (selection score = mean Δ × edge density, which biases away from low-edge sky regions toward dense structure); it lands on the lower arcade, edges painted orange-red.*
+
+Two takeaways:
+
+- **The structural metric cross-validates the LPIPS finding from an orthogonal direction.** GT-vs-FP32 ≈ GT-vs-INT8 in edge-orientation terms (10.68° vs 10.68°, indistinguishable). The "INT8 doesn't degrade perception" result from LPIPS is **not** hiding a geometric failure that LPIPS would miss — quantization-induced structural drift is < 1°, comfortably below human-perceptible thresholds for edge misalignment.
+- **The SR baseline's own structural drift (~10°) is a separate, real, and quantization-independent problem.** Neither LPIPS nor PSNR catches it well; the gradient orientation map makes it directly visible. The natural remediation is training-side (gradient-supervised auxiliary loss, perceptual-structural loss like DISTS, or GAN fine-tune) rather than quantization-side — out of scope for this report, but the diagnostic infrastructure is in place for a follow-up. A `--scan` mode ranks the entire val set by GT-vs-INT8 structural delta to help locate the most-distorted images for analysis.
+
+**Scripts** — [src/quantization/structural_heatmap.py](src/quantization/structural_heatmap.py) (gradient orientation pipeline; `--scan` ranks val images by structural drift)
+**Outputs** — [structural_heatmap_0879.png](results/quantization/200ep_with_report/structural_heatmaps/structural_heatmap_0879.png) · [scan_ranking.csv](results/quantization/200ep_with_report/structural_heatmaps/scan_ranking.csv)
+
 **How to reproduce**
 
 ```bash
