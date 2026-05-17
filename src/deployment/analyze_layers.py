@@ -24,7 +24,7 @@ Outputs
 
 Run::
 
-    python -m src.deployment.analyze_layers --checkpoint results/runs/.../checkpoints/best.pt --output-dir results/layer_analysis/edsr_200ep --data-root  data/DIV2K --val-dir DIV2K_valid_HR
+    python -m src.deployment.analyze_layers --checkpoint results/runs/.../checkpoints/best.pt --output-dir results/layer_analysis/edsr_200ep_with_add --data-root  data/DIV2K --val-dir DIV2K_valid_HR
 """
 
 from __future__ import annotations

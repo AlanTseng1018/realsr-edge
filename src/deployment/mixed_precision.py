@@ -6,7 +6,7 @@ in FP32 while quantizing the rest to INT8.
 
 Run::
 
-    python -m src.deployment.mixed_precision --checkpoint results/runs/20260427_143542_ep200_b16_scale2_realistic/checkpoints/best.pt --sensitivity results/layer_analysis/edsr_200ep/layer_analysis.csv --output-dir  results/mixed_precision/edsr_200ep --data-root   data/DIV2K --val-dir DIV2K_valid_HR
+    python -m src.deployment.mixed_precision --checkpoint results/runs/20260427_143542_ep200_b16_scale2_realistic/checkpoints/best.pt --sensitivity results/layer_analysis/edsr_200ep_with_add/layer_analysis.csv --output-dir  results/mixed_precision/edsr_200ep --data-root   data/DIV2K --val-dir DIV2K_valid_HR
 """
 
 from __future__ import annotations

@@ -15,7 +15,7 @@ one benchmark execution node.
 
 Run example::
 
-    python -m src.deployment.benchmark_onnx --onnx-dir results/onnx_exports/edsr_200ep --output-dir results/onnx_benchmark/edsr_200ep --providers cuda cpu --bench-shape 1x3x96x96
+    python -m src.deployment.benchmark_onnx --onnx-dir results/onnx_exports/edsr_200ep --output-dir results/onnx_benchmark/edsr_200ep_full --providers cuda cpu --bench-shape 1x3x96x96
 """
 
 from __future__ import annotations
