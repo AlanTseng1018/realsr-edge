@@ -354,6 +354,119 @@ class CalibratingConv2d(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Add wrapper (skip-connection quantization)
+# ---------------------------------------------------------------------------
+
+class CalibratingAdd(nn.Module):
+    """Fake-quant wrapper for a 2-input skip-connection ``a + b``.
+
+    Mirrors :class:`CalibratingConv2d`'s 4-mode state machine, but quantizes
+    the TWO addends instead of ``(input, weight)``. EDSR's skip Adds fuse a
+    high-dynamic-range identity path with a residual; the two addends have
+    different statistics, so each gets its own per-tensor symmetric scale.
+
+    Why this exists
+    ---------------
+    ``wrap_convs`` only catches ``nn.Conv2d``. The skip ``+`` operators in
+    EDSR (1 long skip + 16 ResBlock skips) are plain tensor ops -- invisible
+    to module-replacement. To put them in the per-layer sensitivity sweep we
+    module-ize the Add at construction time. In ``fp32`` mode this is a pure
+    ``a + b``, so the ONNX export graph is byte-identical to the un-wrapped
+    model as long as export happens before any calibration.
+
+    Buffers are registered ``persistent=False`` so they do NOT enter the
+    model ``state_dict`` -- old FP32 checkpoints still load with
+    ``strict=True``, and these calibration stats are re-derived every run.
+    """
+
+    _VALID_MODES = ("fp32", "calibrate", "quantize", "qat")
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Final scales used in quantize mode (one per addend). Non-persistent:
+        # runtime calibration state, never serialized.
+        self.register_buffer("a_amax", torch.tensor(0.0), persistent=False)
+        self.register_buffer("b_amax", torch.tensor(0.0), persistent=False)
+        self.register_buffer("_a_running_max", torch.tensor(0.0), persistent=False)
+        self.register_buffer("_b_running_max", torch.tensor(0.0), persistent=False)
+        self.register_buffer("calibrated", torch.tensor(False), persistent=False)
+        self.mode: str = "fp32"
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in self._VALID_MODES:
+            raise ValueError(f"mode must be in {self._VALID_MODES}, got {mode!r}")
+        if mode == "quantize" and not bool(self.calibrated):
+            raise RuntimeError(
+                "Cannot enter 'quantize' mode before calibration. "
+                "Run a calibration pass with mode='calibrate' first."
+            )
+        self.mode = mode
+
+    def reset_calibration(self) -> None:
+        self.a_amax.zero_()
+        self.b_amax.zero_()
+        self._a_running_max.zero_()
+        self._b_running_max.zero_()
+        self.calibrated.fill_(False)
+
+    def forward(self, a: Tensor, b: Tensor) -> Tensor:
+        if self.mode == "fp32":
+            return a + b
+
+        if self.mode == "calibrate":
+            with torch.no_grad():
+                self._a_running_max.copy_(
+                    torch.maximum(self._a_running_max, a.detach().abs().amax())
+                )
+                self._b_running_max.copy_(
+                    torch.maximum(self._b_running_max, b.detach().abs().amax())
+                )
+                # Default scale source = running max-abs.
+                self.a_amax.copy_(self._a_running_max)
+                self.b_amax.copy_(self._b_running_max)
+                self.calibrated.fill_(True)
+            return a + b
+
+        # quantize / qat -- only difference is whether round carries STE grad.
+        if self.mode == "quantize":
+            a_q = quantize_dequantize_per_tensor(a, per_tensor_scale(self.a_amax))
+            b_q = quantize_dequantize_per_tensor(b, per_tensor_scale(self.b_amax))
+            return a_q + b_q
+
+        # mode == 'qat'
+        a_q = quantize_dequantize_per_tensor_ste(a, per_tensor_scale(self.a_amax))
+        b_q = quantize_dequantize_per_tensor_ste(b, per_tensor_scale(self.b_amax))
+        return a_q + b_q
+
+    def apply_calibration_method(
+        self,
+        method: str = "max-abs",
+        percentile: float = 0.999,
+    ) -> None:
+        """Interface-compatible with :meth:`CalibratingConv2d.apply_calibration_method`
+        so :func:`apply_calibration_to_all` can run over a mixed dict.
+
+        Only ``max-abs`` is supported -- the addend amax is already set to the
+        running max during the calibration pass; this just makes it explicit.
+        """
+        if not bool(self.calibrated):
+            raise RuntimeError(
+                "apply_calibration_method called before any calibration pass."
+            )
+        if method == "max-abs":
+            self.a_amax.copy_(self._a_running_max)
+            self.b_amax.copy_(self._b_running_max)
+        else:
+            raise ValueError(
+                f"CalibratingAdd only supports method='max-abs', got {method!r}. "
+                f"Histogram/percentile calibration is not implemented for Add."
+            )
+
+    def extra_repr(self) -> str:
+        return f"mode={self.mode}, calibrated={bool(self.calibrated)}"
+
+
+# ---------------------------------------------------------------------------
 # Helpers to wrap / unwrap a model in-place
 # ---------------------------------------------------------------------------
 
@@ -408,3 +521,26 @@ def apply_calibration_to_all(
     """
     for w in wrappers.values():
         w.apply_calibration_method(method=method, percentile=percentile)
+
+
+def collect_quant_modules(
+    model: nn.Module,
+) -> dict[str, CalibratingConv2d | CalibratingAdd]:
+    """Return ``{dotted_name -> module}`` for every quantizable unit.
+
+    Picks up BOTH :class:`CalibratingConv2d` (inserted by :func:`wrap_convs`)
+    and :class:`CalibratingAdd` (present from model construction). Use this
+    when an analysis should cover the whole graph -- e.g. a per-layer
+    sensitivity sweep that includes skip-connection Adds, not just convs.
+
+    Typical order of operations::
+
+        model = build_model()          # has CalibratingAdd from __init__
+        wrap_convs(model)              # Conv2d -> CalibratingConv2d
+        units = collect_quant_modules(model)   # 36 Conv + 17 Add
+    """
+    return {
+        name: m
+        for name, m in model.named_modules()
+        if isinstance(m, (CalibratingConv2d, CalibratingAdd))
+    }

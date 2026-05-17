@@ -46,8 +46,10 @@ from torch.utils.data import DataLoader
 from src.data.dataset import SRDataset
 from src.models.edsr import EDSR
 from src.quantization.fake_quant import (
+    CalibratingAdd,
     CalibratingConv2d,
     apply_calibration_to_all,
+    collect_quant_modules,
     per_channel_scale,
     set_all_modes,
     wrap_convs,
@@ -220,8 +222,14 @@ def build_layer_table(
     weight_rows: list[dict],
     act_stats:   dict[str, dict],
     sensitivity: dict[str, float],
+    add_names:   list[str] | None = None,
 ) -> list[dict]:
-    """Merge weight stats, activation stats, and sensitivity into one table."""
+    """Merge weight stats, activation stats, and sensitivity into one table.
+
+    ``add_names`` are skip-connection Add units: they have no weight and no
+    single activation amax (they quantize two addends), so those columns are
+    NaN -- but they DO carry an isolated_psnr from the sensitivity sweep.
+    """
     rows = []
     for r in weight_rows:
         name = r["layer"]
@@ -229,6 +237,7 @@ def build_layer_table(
         sens = sensitivity.get(name, float("nan"))
         rows.append({
             "layer":          name,
+            "kind":           "conv",
             "shape":          r["shape"],
             "out_ch":         r["out_ch"],
             "w_amax":         r["w_amax"],
@@ -238,6 +247,20 @@ def build_layer_table(
             "act_amax":       act.get("act_amax", float("nan")),
             "act_scale":      act.get("act_scale", float("nan")),
             "isolated_psnr":  sens,
+        })
+    for name in (add_names or []):
+        rows.append({
+            "layer":          name,
+            "kind":           "add",
+            "shape":          [],
+            "out_ch":         0,
+            "w_amax":         float("nan"),
+            "w_scale_mean":   float("nan"),
+            "w_scale_max":    float("nan"),
+            "w_dynamic_range": float("nan"),
+            "act_amax":       float("nan"),
+            "act_scale":      float("nan"),
+            "isolated_psnr":  sensitivity.get(name, float("nan")),
         })
     # Sort by sensitivity ascending (most sensitive = lowest PSNR = quantize hurts most)
     rows.sort(key=lambda r: r["isolated_psnr"])
@@ -249,6 +272,8 @@ def build_layer_table(
 # ---------------------------------------------------------------------------
 
 def plot_weight_scales(rows: list[dict], output_path: Path) -> None:
+    # Weight stats only exist for conv units; skip Add units.
+    rows = [r for r in rows if r.get("kind", "conv") == "conv"]
     labels = [r["layer"] for r in rows]
     means  = [r["w_scale_mean"] for r in rows]
     maxs   = [r["w_scale_max"]  for r in rows]
@@ -277,6 +302,8 @@ def plot_weight_scales(rows: list[dict], output_path: Path) -> None:
 
 
 def plot_activation_amaxes(rows: list[dict], output_path: Path) -> None:
+    # Single-tensor activation amax only exists for conv units; skip Add units.
+    rows = [r for r in rows if r.get("kind", "conv") == "conv"]
     labels = [r["layer"] for r in rows]
     amaxes = [r["act_amax"] for r in rows]
 
@@ -423,8 +450,17 @@ def main() -> None:
     # Load model
     print("\n[1/5] Loading model ...")
     model = load_model(ckpt, device)
-    wrappers = wrap_convs(model)
+    wrappers = wrap_convs(model)            # 36 Conv2d -> CalibratingConv2d
+    # Skip-connection Adds are CalibratingAdd from model construction; collect
+    # them so the sensitivity sweep covers the whole graph, not just convs.
+    add_modules = {
+        name: m for name, m in model.named_modules()
+        if isinstance(m, CalibratingAdd)
+    }
+    all_units = {**wrappers, **add_modules}  # 36 Conv + 17 Add
     print(f"  Conv2d layers found: {len(wrappers)}")
+    print(f"  skip-Add units found: {len(add_modules)}")
+    print(f"  total quantizable units: {len(all_units)}")
     for name, w in list(wrappers.items())[:3]:
         print(f"    {name}: {list(w.conv.weight.shape)}")
     print("    ...")
@@ -443,29 +479,31 @@ def main() -> None:
     print("\n[2/5] Extracting weight stats from checkpoint ...")
     weight_rows = extract_weight_stats(wrappers)
 
-    # Calibration
+    # Calibration -- covers conv inputs/weights AND skip-Add addends.
     print(f"\n[3/5] Calibrating activations ({args.n_calib} images) ...")
-    calibrate(model, wrappers, loader, args.n_calib, device)
-    act_stats = collect_activation_stats(wrappers)
+    calibrate(model, all_units, loader, args.n_calib, device)
+    act_stats = collect_activation_stats(wrappers)   # single-tensor amax: conv only
     amax_vals = [v["act_amax"] for v in act_stats.values()]
     print(f"  act_amax range: [{min(amax_vals):.4e}, {max(amax_vals):.4e}]")
 
-    # Isolated sensitivity
+    # Isolated sensitivity -- sweep ALL 53 units (36 Conv + 17 Add).
     print(f"\n[4/5] Isolated sensitivity ({args.n_sensitivity} images × "
-          f"{len(wrappers)} layers) ...")
+          f"{len(all_units)} units: {len(wrappers)} conv + {len(add_modules)} add) ...")
     sensitivity = compute_isolated_sensitivity(
-        model, wrappers, loader, args.n_sensitivity, device
+        model, all_units, loader, args.n_sensitivity, device
     )
 
-    # E2E fake-INT8 PSNR
+    # E2E fake-INT8 PSNR -- all 53 units quantized at once.
     print("\n[5/5] End-to-end fake-INT8 PSNR ...")
     e2e_psnr = compute_e2e_fake_quant_psnr(
-        model, wrappers, loader, args.n_sensitivity, device
+        model, all_units, loader, args.n_sensitivity, device
     )
     print(f"  E2E fake-INT8 PSNR (vs FP32): {e2e_psnr:.2f} dB")
 
     # Merge table and write outputs
-    layer_table = build_layer_table(weight_rows, act_stats, sensitivity)
+    layer_table = build_layer_table(
+        weight_rows, act_stats, sensitivity, add_names=list(add_modules.keys())
+    )
 
     print("\nWriting outputs ...")
     plot_weight_scales(layer_table, out / "weight_scales.png")

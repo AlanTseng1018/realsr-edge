@@ -41,6 +41,7 @@ import torch
 from torch import Tensor, nn
 
 from src.models.common import ResBlock
+from src.quantization.fake_quant import CalibratingAdd
 
 
 class _Upsampler(nn.Sequential):
@@ -108,10 +109,15 @@ class EDSR(nn.Module):
         self.upsampler = _Upsampler(scale_factor, n_feats)
         self.tail = nn.Conv2d(n_feats, n_colors, 3, padding=1)
 
+        # Long skip Add as a module so it joins the per-layer sensitivity
+        # sweep. In 'fp32' mode (default) this is a plain x + res, so the
+        # exported ONNX graph is byte-identical to the un-wrapped model.
+        self.long_skip_add = CalibratingAdd()
+
     def forward(self, x: Tensor) -> Tensor:
         x = self.head(x)
         res = self.body(x)
-        x = x + res  # long skip; no in-place add to keep the graph clean for ONNX
+        x = self.long_skip_add(x, res)  # long skip; module-ized for quant sweep
         x = self.upsampler(x)
         x = self.tail(x)
         return x

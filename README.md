@@ -201,22 +201,26 @@ python -m src.quantization.calibration_ablation \
 
 ### 2.5 Per-layer sensitivity
 
-Each of the 36 Conv2d layers is INT8-quantized in isolation while the rest stay FP32. The PSNR drop for that single layer is the layer's *sensitivity score*.
+The sweep covers all **53 quantizable units** — 36 Conv2d layers **plus 17 skip-connection Add operators** (16 inside ResBlocks + 1 long head→tail skip). Each unit is INT8-quantized in isolation while the rest stay FP32; the PSNR drop for that single unit is its *sensitivity score*. Including Adds matters: a v1 of this analysis quantized only Conv2d and silently missed that the long skip-add is one of the most sensitive points in the graph (rank 3, below).
 
-The top of the ranking is concentrated and intuitive: pixel-shuffle / final-projection / first-conv layers hurt the most.
+![per-layer isolated INT8 sensitivity (Conv2d + skip Adds)](results/layer_analysis/edsr_200ep_with_add/sensitivity.png)
+*All 53 quantizable units ranked by **output-fidelity PSNR** — FP32 output vs single-unit-INT8 output. Note this is an internal-fidelity metric (large dynamic range, ~53–78 dB) and is distinct from the end-to-end SR PSNR drop in the table below (small dynamic range); the rankings agree. **Six red bars** fall below the all-INT8 E2E reference at **45.6 dB**: `tail`, `upsampler.0`, **`long_skip_add`**, `head`, `body.16`, `body.15.skip_add`. Two of the six are skip-connection Adds — a finding the Conv2d-only v1 was structurally blind to. The remaining 47 units stay above 60 dB.*
 
-![per-layer isolated INT8 sensitivity](results/layer_analysis/edsr_200ep/sensitivity.png)
-*All 36 Conv2d layers ranked by **output-fidelity PSNR** — FP32 output vs single-layer-INT8 output. Note this is an internal-fidelity metric (large dynamic range, ~48–78 dB) and is distinct from the end-to-end SR PSNR drop in the table below (small dynamic range, < 0.03 dB); the rankings agree. Four red bars (`tail`, `upsampler.0`, `head`, `body.16`) fall below the all-INT8 E2E reference at 48.9 dB; the remaining 32 stay above 65 dB. The spread is the data behind the top-N FP32 strategy in §2.6.*
+| Rank | Unit | Kind | Isolated PSNR (dB) |
+|---|---|---|---:|
+| 1 | `tail` | conv (output) | 53.06 |
+| 2 | `upsampler.0` | conv (pixel-shuffle) | 55.13 |
+| 3 | **`long_skip_add`** | **Add (head → tail bypass)** | **55.15** |
+| 4 | `head` | conv (input) | 56.73 |
+| 5 | `body.16` | conv (post-resblock) | 58.52 |
+| 6+ | resblock interior convs + per-block skip Adds | mostly > 60 dB | — |
 
-| Rank | Layer | PSNR drop (dB) when this layer is INT8 alone |
-|---|---|---|
-| 1 | `tail` | 0.029 |
-| 2 | `upsampler.0` | 0.020 |
-| 3 | `head` | 0.016 |
-| 4 | `body.16` | 0.007 |
-| 5+ | `body.*.conv2` (residual blocks) | < 0.001 each |
+→ Two findings the Conv-only v1 missed:
 
-→ The body of the network is **highly INT8-tolerant**; the heads/tail/upsampler carry almost all the sensitivity. This is exactly the input the mixed-precision sweep needs.
+1. **`long_skip_add` ranks 3rd, ahead of `head`.** The residual-bypass tensor that carries `head`'s full FP32 dynamic range from input to the post-body fusion is structurally one of the most sensitive points in the graph — quantizing it loses more E2E fidelity than quantizing `head` itself. This is consistent with information theory: the long skip carries the largest single-tensor dynamic range in the network and gets clipped hardest by INT8.
+2. **Adds account for ~3.3 dB of the total INT8 error budget.** The E2E fake-INT8 PSNR reference dropped from 48.9 dB (Conv-only v1) to **45.6 dB** once skip Adds were included in the sweep. Add quantization is a meaningful share of the deploy-time degradation that prior analyses (and many SR PTQ papers) silently discard by leaving Add ops in FP32. For a vendor whose NPU quantizes Adds (most do — Add is fused into the Conv-Add-ReLU block), this is the real number.
+
+The body interior convs remain highly INT8-tolerant. The natural **v2 mixed-precision recipe** keeps `tail, upsampler.0, long_skip_add, head` in higher precision and INT8 the rest; §2.6 below was run on the v1 (Conv-only) ranking and would shift slightly under v2 — re-running the sweep with `long_skip_add` in the top-N is the natural next iteration, not done here.
 
 **How to reproduce** — sensitivity is computed by the same `analyze.py` invocation as 2.2 (skip with `--skip-sensitivity` if not needed).
 

@@ -18,6 +18,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from src.quantization.fake_quant import CalibratingAdd
+
 
 class ResBlock(nn.Module):
     """Residual block: Conv -> ReLU -> Conv, plus skip connection.
@@ -41,9 +43,13 @@ class ResBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(n_channels, n_channels, kernel_size, padding=padding, bias=True)
         self.res_scale = res_scale
+        # Skip-connection Add as a module so it can be fake-quantized in the
+        # per-layer sweep. In 'fp32' mode (default) this is a plain x + residual,
+        # so the ONNX export graph is unchanged.
+        self.skip_add = CalibratingAdd()
 
     def forward(self, x: Tensor) -> Tensor:
         residual = self.conv2(self.relu(self.conv1(x)))
         if self.res_scale != 1.0:
             residual = residual * self.res_scale
-        return x + residual
+        return self.skip_add(x, residual)
