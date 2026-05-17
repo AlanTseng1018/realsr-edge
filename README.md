@@ -11,6 +11,36 @@ The project is structured as four investigation tracks layered on a single train
 
 This README currently covers sections 1, 2, and 3; section 4 will be added incrementally.
 
+## Pipeline overview
+
+Three execution stages with different optimization or validation questions. **Stage 2 is a chained dependency** (each step's output drives the next); **Stage 3 is a fan-out** of independent deployment-side checks. The detector set is locked at this scope — no new detectors / architectures / domains are planned; project work is "train model → apply locked detectors → produce evidence and find anomalies".
+
+```
+[Stage 1] Training (§1)
+    DIV2K HR + realistic degradation ──▶ EDSR FP32 ─── (optional QAT 20ep fine-tune)
+    └─ output: best.pt
+
+[Stage 2] Quantization Optimization — chained (§2)
+    format shootout (§2.2)                — FP32 / FP16 / BF16 / INT8 PTQ / INT8 QAT
+        ↓ frames the precision options
+    per-layer sensitivity (§2.5)          — 53 units inc. 17 skip Adds; ranks who needs higher precision
+        ↓ identifies top-N sensitive layers
+    calibration ablation (§2.4)           — max-abs vs percentile vs histogram; picks scale-computation method
+        ↓ feeds chosen calibration into mixed sweep
+    mixed-precision sweep (§2.6)          — PTQ vs QAT, top-N kept in FP32
+    └─ output: decision package — recipe + reasoning + scope boundary
+
+[Stage 3] Deployment Check — fan-out, parallel (§3)
+    ├─ ONNX × 3 EP shootout (§3.2)        — PSNR / LPIPS / latency across CPU / CUDA / TensorRT EP
+    ├─ Spatial detectors on ONNX (§3.2)   — LPIPS heatmap + gradient-orientation structural heatmap
+    ├─ Native TRT (§3.3)                  — catches the QDQ paradox vs ORT TRT EP
+    ├─ Roofline / tensor-core util (§3.4) — hardware efficiency, where the cycles actually go
+    └─ C++ cross-language fidelity (§3.5) — byte-level Python vs C++ runner agreement
+    └─ output: deploy_summary + cross-stack verification tables
+```
+
+All Stage-2 spatial detectors also support `--source onnx` to re-run on Stage-3 ONNX artefacts; the cross-backend agreement is quantified in [pytorch_vs_onnx_cross_validation.md](results/quantization/200ep_with_report/pytorch_vs_onnx_cross_validation.md) (TL;DR: 8/10 overlap on per-image worst cases, fake-quant under-predicts deploy magnitude by ~2-3× but direction agrees).
+
 ---
 
 ## 1. Model Training
@@ -350,6 +380,8 @@ Two takeaways:
 
 - **The structural metric cross-validates the LPIPS finding from an orthogonal direction, on the ONNX deploy artefact.** GT-vs-FP32 ≈ GT-vs-INT8 in edge-orientation terms (9.81° vs 9.86°, indistinguishable). The "INT8 doesn't degrade perception" result from LPIPS is **not** hiding a geometric failure on the deployed model — quantization-induced structural drift is ~1°, comfortably below human-perceptible thresholds for edge misalignment. Two independent measurement classes (feature-space LPIPS and gradient-space orientation) on the same ONNX inference output converge on the same conclusion.
 - **The SR baseline's own structural drift (~10°) is a separate, real, and quantization-independent problem.** Neither LPIPS nor PSNR catches it well; the gradient orientation map makes it directly visible. The natural remediation is training-side (gradient-supervised auxiliary loss, perceptual-structural loss like DISTS, or GAN fine-tune) rather than quantization-side — out of scope for this report, but the diagnostic infrastructure is in place for a follow-up. A `--scan` mode ranks the entire val set by GT-vs-INT8 structural delta to help locate the most-distorted images for analysis.
+
+The full Stage-2-vs-Stage-3 backend agreement analysis across all 100 val images (per-image LPIPS rise distribution, structural scan top-K overlap, magnitude bias quantification) is in [pytorch_vs_onnx_cross_validation.md](results/quantization/200ep_with_report/pytorch_vs_onnx_cross_validation.md). Headline: 8/10 overlap on top-10 worst-rise images for both detectors, fake-quant under-predicts deploy-side spatial delta by ~2-3× but direction and per-image priority order are preserved.
 
 **Scripts** — [src/quantization/structural_heatmap.py](src/quantization/structural_heatmap.py) and [src/quantization/lpips_heatmap.py](src/quantization/lpips_heatmap.py) — both support `--source {pytorch,onnx}` so the same detectors run on Stage-2 fake-quant and Stage-3 ONNX deployment without code duplication.
 **Outputs** — [structural_heatmap_0879_onnx.png](results/quantization/200ep_with_report/structural_heatmaps/structural_heatmap_0879_onnx.png) · [heatmap_0879_onnx.png](results/quantization/200ep_with_report/lpips_heatmaps/heatmap_0879_onnx.png) · [scan_ranking_onnx.csv](results/quantization/200ep_with_report/structural_heatmaps/scan_ranking_onnx.csv) *(generated on demand via `--scan`)*
